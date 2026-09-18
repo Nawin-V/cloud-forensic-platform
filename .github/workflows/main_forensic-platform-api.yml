@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --target=".python_packages/lib/site-packages" -r requirements.txt
 
       - name: Upload artifact for deployment jobs
         uses: actions/upload-artifact@v4
@@ -60,3 +60,5 @@ jobs:
         with:
           app-name: 'forensic-platform-api'
           slot-name: 'Production'
+          startup-command: 'gunicorn -w 2 -k uvicorn.workers.UvicornWorker main:app'
+
