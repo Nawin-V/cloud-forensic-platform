@@ -63,6 +63,8 @@ jobs:
         with:
           app-name: 'forensic-platform-api'
           slot-name: 'Production'
-          startup-command: 'bash startup.sh'
+          package: .
+          startup-command: 'bash /home/site/wwwroot/startup.sh'
+
 
 
