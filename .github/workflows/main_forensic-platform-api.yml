@@ -25,17 +25,20 @@ jobs:
 
       - name: Create and install virtual environment dependencies
         run: |
-          python -m venv --copies antenv
+          python -m venv antenv
           source antenv/bin/activate
           pip install --upgrade pip
           pip install -r requirements.txt
           pip install --target=".python_packages/lib/site-packages" -r requirements.txt
 
+      - name: Create deployment zip package
+        run: zip -r release.zip . -x '.git*' '.github*' 'frontend*' 'backend/venv*' 'venv*'
+
       - name: Upload artifact for deployment jobs
         uses: actions/upload-artifact@v4
         with:
           name: python-app
-          path: .
+          path: release.zip
 
   deploy:
     runs-on: ubuntu-latest
@@ -63,8 +66,9 @@ jobs:
         with:
           app-name: 'forensic-platform-api'
           slot-name: 'Production'
-          package: .
+          package: release.zip
           startup-command: 'bash /home/site/wwwroot/startup.sh'
+
 
 
 
