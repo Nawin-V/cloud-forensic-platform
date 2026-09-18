@@ -1,13 +1,23 @@
-async function fetchJSON(path, options = {}) {
+const AZURE_API_URL = 'https://forensic-platform-api-asamh5h7fufaewdh.centralindia-01.azurewebsites.net';
+const BASE_URL = (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'))
+  ? '' 
+  : (import.meta.env.VITE_API_URL || AZURE_API_URL);
 
+async function fetchJSON(path, options = {}) {
+  const fullPath = path.startsWith('http') ? path : `${BASE_URL}${path}`;
   const urls = [
+    fullPath,
     path,
     `http://127.0.0.1:8000${path}`,
-    `http://localhost:8000${path}`
+    `http://localhost:8000${path}`,
+    `${AZURE_API_URL}${path}`
   ];
   
   let lastErr = null;
+  const tried = new Set();
   for (const url of urls) {
+    if (!url || tried.has(url)) continue;
+    tried.add(url);
     try {
       const res = await fetch(url, options);
       if (res.ok) return await res.json();
@@ -19,14 +29,20 @@ async function fetchJSON(path, options = {}) {
 }
 
 async function fetchText(path, options = {}) {
+  const fullPath = path.startsWith('http') ? path : `${BASE_URL}${path}`;
   const urls = [
+    fullPath,
     path,
     `http://127.0.0.1:8000${path}`,
-    `http://localhost:8000${path}`
+    `http://localhost:8000${path}`,
+    `${AZURE_API_URL}${path}`
   ];
   
   let lastErr = null;
+  const tried = new Set();
   for (const url of urls) {
+    if (!url || tried.has(url)) continue;
+    tried.add(url);
     try {
       const res = await fetch(url, options);
       if (res.ok) return await res.text();
@@ -91,7 +107,8 @@ export const api = {
 
   // 4. Reports & Exports
   getReportPdfUrl(id) {
-    return `/api/incidents/${id}/report?format=pdf`;
+    const base = BASE_URL || AZURE_API_URL;
+    return `${base}/api/incidents/${id}/report?format=pdf`;
   },
 
   async getReportMarkdown(id) {
