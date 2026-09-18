@@ -1,0 +1,11 @@
+{
+  "name": "cloud-forensic-platform-root",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloud Incident & Forensic Response Platform",
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "start": "npm --prefix frontend run dev"
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "best_algorithm": "gradient_boosting",
+  "dataset_samples": 600,
+  "metrics": {
+    "r2_score": 0.9386465806222107,
+    "cv_r2_score": 0.9288266199591737,
+    "rmse": 5.524723333746437,
+    "mae": 4.058170647771866
+  },
+  "all_models": {
+    "random_forest": {
+      "r2_cv": 0.8381323230621269,
+      "rmse": 8.242617885282545,
+      "mae": 6.401837706535121
+    },
+    "gradient_boosting": {
+      "r2_cv": 0.9288266199591737,
+      "rmse": 5.524723333746437,
+      "mae": 4.058170647771866
+    }
+  },
+  "top_features": [
+    {
+      "feature_key": "exfiltrated_data_mb",
+      "label": "Outbound Data Exfiltration Volume (MB)",
+      "importance": 0.3393,
+      "importance_percentage": 33.93
+    },
+    {
+      "feature_key": "sentinel_static_severity_code",
+      "label": "Sentinel Base Alert Severity",
+      "importance": 0.1264,
+      "importance_percentage": 12.64
+    },
+    {
+      "feature_key": "nsg_unrestricted_inbound_any",
+      "label": "NSG Unrestricted Inbound (0.0.0.0/0)",
+      "importance": 0.0965,
+      "importance_percentage": 9.65
+    },
+    {
+      "feature_key": "iam_scope_level_code",
+      "label": "IAM Scope Breadth (Subscription/Tenant)",
+      "importance": 0.0689,
+      "importance_percentage": 6.89
+    },
+    {
+      "feature_key": "iam_recent_role_elevation",
+      "label": "Recent IAM Role Elevation",
+      "importance": 0.0645,
+      "importance_percentage": 6.45
+    },
+    {
+      "feature_key": "contains_sensitive_pii_flag",
+      "label": "Target Resource Holds Sensitive PII",
+      "importance": 0.053,
+      "importance_percentage": 5.3
+    },
+    {
+      "feature_key": "imds_token_accessed",
+      "label": "VM IMDS Managed Identity Token Access",
+      "importance": 0.0475,
+      "importance_percentage": 4.75
+    },
+    {
+      "feature_key": "custom_role_wildcard_perm",
+      "label": "Custom IAM Role with Wildcard (*) Permissions",
+      "importance": 0.0453,
+      "importance_percentage": 4.53
+    },
+    {
+      "feature_key": "mfa_bypassed",
+      "label": "MFA / Conditional Access Bypass",
+      "importance": 0.0378,
+      "importance_percentage": 3.78
+    },
+    {
+      "feature_key": "storage_sas_unrestricted",
+      "label": "Unrestricted Storage SAS Token",
+      "importance": 0.0315,
+      "importance_percentage": 3.15
+    },
+    {
+      "feature_key": "unusual_geo_ip",
+      "label": "Anomalous Sign-in Geo IP",
+      "importance": 0.0313,
+      "importance_percentage": 3.13
+    },
+    {
+      "feature_key": "keyvault_secret_accessed",
+      "label": "Key Vault Secret Retrieval Detected",
+      "importance": 0.0295,
+      "importance_percentage": 2.95
+    },
+    {
+      "feature_key": "storage_public_access_enabled",
+      "label": "Storage Blob Public Access Enabled",
+      "importance": 0.0286,
+      "importance_percentage": 2.86
+    }
+  ],
+  "feature_columns": [
+    "sentinel_static_severity_code",
+    "iam_recent_role_elevation",
+    "iam_scope_level_code",
+    "mfa_bypassed",
+    "unusual_geo_ip",
+    "storage_public_access_enabled",
+    "storage_sas_unrestricted",
+    "exfiltrated_data_mb",
+    "nsg_unrestricted_inbound_any",
+    "imds_token_accessed",
+    "keyvault_secret_accessed",
+    "contains_sensitive_pii_flag",
+    "custom_role_wildcard_perm"
+  ]
+}

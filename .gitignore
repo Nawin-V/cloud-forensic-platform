@@ -1,0 +1,39 @@
+# Environment and Secrets
+.env
+*.env
+backend/.env
+serviceAccountKey.json
+backend/serviceAccountKey.json
+*.pem
+*.key
+
+# Python Virtual Environment & Caches
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Node & Frontend Build
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Generated PDF reports & scratch cache
+backend/app/reports/*.pdf
+backend/app/data/incidents/*.json
