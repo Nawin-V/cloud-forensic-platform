@@ -23,9 +23,12 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
+      - name: Create and install virtual environment dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m venv --copies antenv
+          source antenv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
           pip install --target=".python_packages/lib/site-packages" -r requirements.txt
 
       - name: Upload artifact for deployment jobs
@@ -60,5 +63,6 @@ jobs:
         with:
           app-name: 'forensic-platform-api'
           slot-name: 'Production'
-          startup-command: 'gunicorn -w 2 -k uvicorn.workers.UvicornWorker main:app'
+          startup-command: 'bash startup.sh'
+
 
