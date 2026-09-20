@@ -5,7 +5,6 @@ and forensic incident classification.
 """
 
 import os
-import re
 import uuid
 import logging
 from typing import Dict, Any, List, Optional
@@ -35,81 +34,64 @@ def determine_incident_type(payload: Dict[str, Any]) -> str:
         ]:
             return type_upper
 
-    # 2. Extract nested objects and properties from Logic App / Sentinel ARM schemas
-    obj = payload.get("object", {}) if isinstance(payload.get("object"), dict) else {}
-    props = payload.get("properties", {}) if isinstance(payload.get("properties"), dict) else (
-        obj.get("properties", {}) if isinstance(obj.get("properties"), dict) else {}
-    )
-
-    alerts_list = payload.get("Alerts", []) or props.get("alerts", []) or []
-    first_alert_props = alerts_list[0].get("properties", {}) if (alerts_list and isinstance(alerts_list[0], dict)) else {}
-    first_alert_data = first_alert_props.get("additionalData", {}) if isinstance(first_alert_props.get("additionalData"), dict) else {}
-
+    # 2. Extract textual cues from title, rule name, description, tactics, and extended properties
     title = (
         payload.get("Title")
         or payload.get("IncidentTitle")
         or payload.get("IncidentName")
         or payload.get("AlertDisplayName")
         or payload.get("title")
-        or props.get("title")
-        or first_alert_props.get("alertDisplayName")
         or ""
     )
     rule_name = (
         payload.get("AnalyticsRuleName")
         or payload.get("RuleName")
         or payload.get("analyticRuleName")
-        or first_alert_data.get("Analytic Rule Name")
         or ""
     )
     description = (
         payload.get("Description")
         or payload.get("IncidentDescription")
         or payload.get("description")
-        or props.get("description")
-        or first_alert_props.get("description")
         or ""
     )
+    
+    # Check nested properties if Sentinel ARM or Logic App schema
+    props = payload.get("properties") or payload.get("object", {}).get("properties") or {}
+    if isinstance(props, dict):
+        title = title or props.get("title", "")
+        description = description or props.get("description", "")
+        rule_name = rule_name or (props.get("relatedAnalyticRuleIds", [""])[0] if isinstance(props.get("relatedAnalyticRuleIds"), list) and props.get("relatedAnalyticRuleIds") else "")
+        alerts = props.get("alerts", [])
+        if alerts and isinstance(alerts[0], dict):
+            alert_props = alerts[0].get("properties", {})
+            title = title or alert_props.get("alertDisplayName", "")
+            rule_name = rule_name or alert_props.get("additionalData", {}).get("Analytic Rule Name", "")
 
-    ext_props = payload.get("ExtendedProperties", {}) or payload.get("extendedProperties", {}) or {}
+    ext_props = payload.get("ExtendedProperties", {}) or payload.get("extendedProperties", {})
     result_type = str(ext_props.get("ResultType", ""))
     failure_reason = str(ext_props.get("FailureReason", ""))
 
-    tactics = (
-        payload.get("Tactics", [])
-        or payload.get("tactics", [])
-        or props.get("additionalData", {}).get("tactics", [])
-        or first_alert_props.get("tactics", [])
-        or []
-    )
+    tactics = payload.get("Tactics", []) or payload.get("tactics", []) or []
     tactics_str = " ".join([str(t) for t in tactics])
 
-    techniques = (
-        payload.get("Techniques", [])
-        or payload.get("techniques", [])
-        or props.get("additionalData", {}).get("techniques", [])
-        or []
-    )
-    techniques_str = " ".join([str(t) for t in techniques])
-
-    combined_text = f"{title} {rule_name} {description} {tactics_str} {techniques_str} {result_type} {failure_reason}".lower()
+    combined_text = f"{title} {rule_name} {description} {tactics_str} {result_type} {failure_reason}".lower()
 
     # Rule 1: Brute Force / Account Lockout / Credential Access
     bf_keywords = [
         "brute force", "bruteforce", "password guessing", "password spray",
         "account lockout", "lockout detection", "failed sign-in", "failed sign in",
         "failed login", "authentication failure", "50053", "50126", "50057",
-        "smart lockout", "credential access", "too many attempts", "entra id - brute force",
-        "credentialaccess", "t1110"
+        "smart lockout", "credential access", "too many attempts", "entra id - brute force"
     ]
-    if any(kw in combined_text for kw in bf_keywords) or result_type in ["50053", "50126", "50057"] or "t1110" in techniques_str.lower():
+    if any(kw in combined_text for kw in bf_keywords) or result_type in ["50053", "50126", "50057"]:
         return "BRUTE_FORCE"
 
     # Rule 2: IMDS Token Theft / Metadata API Exploitation
     imds_keywords = [
         "imds", "169.254.169.254", "managed identity", "token theft",
         "instance metadata", "metadata probe", "oauth2/token", "token harvest",
-        "system-assigned identity", "t1552.005"
+        "system-assigned identity"
     ]
     if any(kw in combined_text for kw in imds_keywords):
         return "IMDS_TOKEN_THEFT"
@@ -127,8 +109,7 @@ def determine_incident_type(payload: Dict[str, Any]) -> str:
     iam_keywords = [
         "privilege escalation", "role assignment", "custom role", "elevated access",
         "superadmin", "contributor role", "owner role", "role definition",
-        "wildcard permission", "iam modification", "rbac elevation", "super admin",
-        "privilegeescalation", "t1098"
+        "wildcard permission", "iam modification", "rbac elevation", "super admin"
     ]
     if any(kw in combined_text for kw in iam_keywords):
         return "PRIVILEGE_ESCALATION"
@@ -136,7 +117,7 @@ def determine_incident_type(payload: Dict[str, Any]) -> str:
     # Rule 5: Network Attack & Perimeter Reconnaissance
     net_keywords = [
         "port sweep", "port scan", "syn flood", "ddos", "unauthorized ingress",
-        "network scan", "active scanning", "open nsg", "nsg flow", "t1595"
+        "network scan", "active scanning", "open nsg", "nsg flow"
     ]
     if any(kw in combined_text for kw in net_keywords):
         return "NETWORK_ATTACK"
@@ -166,57 +147,57 @@ class AzureSentinelService:
         Normalizes entities, extracts target resources, classifies incident type,
         and preserves original Sentinel metadata.
         """
-        obj = payload.get("object", {}) if isinstance(payload.get("object"), dict) else {}
-        props = payload.get("properties", {}) if isinstance(payload.get("properties"), dict) else (
-            obj.get("properties", {}) if isinstance(obj.get("properties"), dict) else {}
-        )
-
         # 1. Normalize Incident ID
-        raw_id = (
-            props.get("incidentNumber")
-            or payload.get("IncidentId")
+        incident_id = (
+            payload.get("IncidentId")
             or payload.get("IncidentNumber")
-            or obj.get("name")
             or payload.get("id")
-            or f"{uuid.uuid4().hex[:8].upper()}"
+            or payload.get("name")
+            or f"INC-AZURE-{uuid.uuid4().hex[:8].upper()}"
         )
-        incident_id = f"INC-AZURE-{str(raw_id).replace('#', '').strip()}" if not str(raw_id).startswith("INC-") else str(raw_id)
+        if not str(incident_id).startswith("INC-"):
+            incident_id = f"INC-AZURE-{str(incident_id).replace('#', '').strip()}"
 
-        # 2. Extract Alerts list and metadata
+        # 2. Extract Title and Properties
+        props = payload.get("properties") or payload.get("object", {}).get("properties") or {}
+        if not isinstance(props, dict):
+            props = {}
         alerts_list = payload.get("Alerts", []) or props.get("alerts", []) or []
-        first_alert_props = alerts_list[0].get("properties", {}) if (alerts_list and isinstance(alerts_list[0], dict)) else {}
-        first_alert_data = first_alert_props.get("additionalData", {}) if isinstance(first_alert_props.get("additionalData"), dict) else {}
+        first_alert_title = ""
+        first_alert_rule = ""
+        if alerts_list and isinstance(alerts_list[0], dict):
+            alert_props = alerts_list[0].get("properties", {}) if isinstance(alerts_list[0].get("properties"), dict) else alerts_list[0]
+            first_alert_title = alert_props.get("alertDisplayName") or alert_props.get("AlertDisplayName", "")
+            first_alert_rule = alert_props.get("additionalData", {}).get("Analytic Rule Name", "")
 
-        # 3. Extract Title
         title = (
             payload.get("Title")
             or payload.get("IncidentTitle")
             or payload.get("IncidentName")
-            or props.get("title")
-            or first_alert_props.get("alertDisplayName")
-            or first_alert_data.get("Analytic Rule Name")
             or payload.get("AnalyticsRuleName")
+            or props.get("title")
+            or first_alert_title
+            or first_alert_rule
             or "Microsoft Entra ID Security Alert"
         )
 
-        # 4. Analytics Rule & Description
+        # 3. Analytics Rule & Description
         analytics_rule_name = (
             payload.get("AnalyticsRuleName")
-            or first_alert_data.get("Analytic Rule Name")
-            or first_alert_props.get("alertDisplayName")
+            or first_alert_rule
+            or first_alert_title
             or payload.get("RuleName")
-            or title
+            or (props.get("relatedAnalyticRuleIds", [""])[0] if isinstance(props.get("relatedAnalyticRuleIds"), list) and props.get("relatedAnalyticRuleIds") else title)
         )
         description = (
             payload.get("Description")
             or payload.get("IncidentDescription")
             or props.get("description")
-            or first_alert_props.get("description")
             or f"Microsoft Sentinel triggered alert for '{title}'."
         )
 
-        # 5. Severity and Status
-        severity = payload.get("Severity") or props.get("severity") or first_alert_props.get("severity") or "Medium"
+        # 4. Severity and Status
+        severity = payload.get("Severity") or props.get("severity") or "Medium"
         status = payload.get("Status") or props.get("status") or "Active"
         created_time = (
             payload.get("CreatedTimeUtc")
@@ -226,11 +207,11 @@ class AzureSentinelService:
         )
         incident_url = payload.get("IncidentUrl") or props.get("incidentUrl") or ""
 
-        # 6. Incident Classification
+        # 5. Incident Classification
         incident_type = determine_incident_type(payload)
 
-        # 7. Entity Extraction
-        entities = payload.get("Entities", []) or props.get("entities", []) or props.get("relatedEntities", []) or []
+        # 6. Entity Extraction
+        entities = payload.get("Entities", []) or props.get("entities", []) or []
         ext_props = payload.get("ExtendedProperties", {}) or payload.get("extendedProperties", {}) or {}
 
         # Default fallback values depending on incident type
@@ -242,13 +223,6 @@ class AzureSentinelService:
             affected_user = "svc-account@corp.azure.com"
             attacker_ip = "198.51.100.74"
             target_resource = f"/subscriptions/{self.subscription_id or 'sub-prod-01'}/resourceGroups/{self.resource_group or 'Core-RG'}"
-
-        # Inspect alert Query if Entra SigninLogs KQL query contained specific user or IP
-        query_text = first_alert_data.get("Query", "") or first_alert_data.get("OriginalQuery", "")
-        if query_text:
-            ip_match = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', query_text)
-            if ip_match and ip_match.group(0) not in ["0.0.0.0", "127.0.0.1"]:
-                attacker_ip = ip_match.group(0)
 
         for ent in entities:
             if not isinstance(ent, dict):
