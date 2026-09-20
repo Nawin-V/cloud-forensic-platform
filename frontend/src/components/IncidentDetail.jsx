@@ -94,11 +94,6 @@ export default function IncidentDetail({
               <span className="badge" style={{ background: '#141414', color: '#cccccc', border: '1px solid #262626' }}>
                 Status: {incident.status || 'Active Investigation'}
               </span>
-              {incident.incident_type && (
-                <span className="badge" style={{ background: 'rgba(192, 132, 252, 0.12)', color: '#c084fc', border: '1px solid rgba(192, 132, 252, 0.3)' }}>
-                  Vector: {incident.incident_type.replace(/_/g, ' ')}
-                </span>
-              )}
               {incident.is_escalated && (
                 <span className="badge badge-escalated">
                   <Flame size={9} /> Sentinel Recalibrated (+{delta} pts)

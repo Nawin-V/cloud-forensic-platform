@@ -4,6 +4,7 @@ Integration Test for FastAPI Endpoints.
 
 import os
 import sys
+import pytest
 from fastapi.testclient import TestClient
 
 backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -3,7 +3,6 @@ FastAPI Endpoints for Incidents, Dynamic ML Scoring, Evidence Inspection, and Fo
 """
 
 import os
-import uuid
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response, FileResponse, HTMLResponse, PlainTextResponse
@@ -11,7 +10,7 @@ from fastapi.responses import Response, FileResponse, HTMLResponse, PlainTextRes
 from app.models.incident import IncidentCreate, IncidentResponse, MLScoreResult
 from app.ml.predictor import DynamicSeverityPredictor
 from app.services.report_generator import ForensicReportGenerator, REPORTS_DIR
-from app.services.azure_sentinel import AzureSentinelService, determine_incident_type
+from app.services.azure_sentinel import AzureSentinelService
 from app.services.evidence_bundler import DeepEvidenceBundler
 from app.services.timeline_builder import TimelineBuilder
 from app.db.firebase import StorageAdapter
@@ -38,17 +37,18 @@ def get_azure_status():
     }
 
 
+
+
 @router.post("/sentinel/webhook")
 def receive_sentinel_webhook(payload: Dict[str, Any]):
     """
     Receives live Sentinel incident webhooks from Azure Sentinel Automation / Logic Apps.
-    Automatically initiates incident-type classification, deep evidence bundling,
-    ML risk scoring, chronological timeline generation, and storage persistence.
+    Automatically initiates deep evidence bundling, ML risk scoring, and storage persistence.
     """
-    # 1. Process and normalize Sentinel alert
+    # 1. Process Sentinel alert
     incident_base = sentinel_service.process_webhook_payload(payload)
 
-    # 2. Deep Evidence Bundling tailored to attack vector
+    # 2. Deep Evidence Bundling
     evidence = bundler.bundle_evidence_for_incident(incident_base)
     incident_base["evidence_snapshot"] = evidence
 
@@ -59,11 +59,7 @@ def receive_sentinel_webhook(payload: Dict[str, Any]):
     # 4. Construct Chronological Timeline
     incident_base["timeline"] = TimelineBuilder.build_timeline(incident_base, evidence)
 
-    # 5. Generate Tailored Remediation Playbook
-    if not incident_base.get("remediation_playbook"):
-        incident_base["remediation_playbook"] = DeepEvidenceBundler.generate_remediation_playbook(incident_base)
-
-    # 6. Save to Storage (Firebase / Local)
+    # 5. Save to Storage (Firebase / Local)
     storage.save_incident(incident_base)
 
     return incident_base
@@ -125,39 +121,18 @@ def purge_all_incidents():
     }
 
 
+
 @router.post("/incidents")
 def create_incident(payload: IncidentCreate):
-    """Creates a new incident, computes real-time dynamic ML score, builds timeline, and saves to storage."""
+    """Creates a new incident, computes real-time dynamic ML score, and saves to storage."""
     inc_dict = payload.model_dump()
     if not inc_dict.get("incident_id"):
+        import uuid
         inc_dict["incident_id"] = f"INC-{uuid.uuid4().hex[:8].upper()}"
 
-    if not inc_dict.get("incident_type"):
-        inc_dict["incident_type"] = determine_incident_type(inc_dict)
-
-    # If evidence snapshot not provided, generate contextual bundle
-    evidence = inc_dict.get("evidence_snapshot")
-    if not evidence:
-        evidence = bundler.bundle_evidence_for_incident(inc_dict)
-        inc_dict["evidence_snapshot"] = evidence
-    elif isinstance(evidence, dict) and "sentinel_static_severity_code" not in evidence:
-        # Normalize partial evidence dict
-        default_bundle = bundler.bundle_evidence_for_incident(inc_dict)
-        default_bundle.update(evidence)
-        inc_dict["evidence_snapshot"] = default_bundle
-        evidence = default_bundle
-
     # Compute ML dynamic score
-    scoring_result = predictor.predict(evidence)
+    scoring_result = predictor.predict(inc_dict.get("evidence_snapshot", {}))
     inc_dict.update(scoring_result)
-
-    # Build timeline if not provided
-    if not inc_dict.get("timeline") or len(inc_dict["timeline"]) == 0:
-        inc_dict["timeline"] = TimelineBuilder.build_timeline(inc_dict, evidence)
-
-    # Generate remediation playbook if empty
-    if not inc_dict.get("remediation_playbook") or len(inc_dict["remediation_playbook"]) == 0:
-        inc_dict["remediation_playbook"] = DeepEvidenceBundler.generate_remediation_playbook(inc_dict)
 
     # Save to storage (Firebase / Local)
     storage.save_incident(inc_dict)

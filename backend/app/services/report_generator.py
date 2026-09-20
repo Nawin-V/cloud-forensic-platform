@@ -19,9 +19,6 @@ from reportlab.platypus import (
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 
-from app.services.azure_sentinel import determine_incident_type
-from app.services.evidence_bundler import DeepEvidenceBundler
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("report_generator")
 
@@ -34,50 +31,17 @@ class ForensicReportGenerator:
     """Generates structured forensic investigation reports in Markdown, HTML, and PDF."""
 
     @staticmethod
-    def _get_finding_summary(incident_type: str, title: str, static_sev: str, dynamic_label: str, dynamic_score: float) -> str:
-        """Generates tailored finding text based on incident classification."""
-        if incident_type == "BRUTE_FORCE":
-            return (
-                f"Microsoft Sentinel triggered an alert for <b>{title}</b> with baseline static severity <b>{static_sev}</b>. "
-                f"Automated identity telemetry analysis confirmed high-frequency failed sign-in attempts against Microsoft Entra ID. "
-                f"The target identity was protected via Smart Lockout enforcement. The Dynamic Risk Model evaluated the incident posture "
-                f"at <b>{dynamic_label.upper()} ({dynamic_score}/100)</b>."
-            )
-        elif incident_type == "PRIVILEGE_ESCALATION":
-            return (
-                f"Azure Sentinel detected unauthorized privilege escalation (<b>{title}</b>). "
-                f"Deep ARM evidence bundling confirmed IAM role elevation to a privileged scope. "
-                f"Dynamic ML Risk Engine recalculated severity to <b>{dynamic_label.upper()} ({dynamic_score}/100)</b>."
-            )
-        elif incident_type == "STORAGE_EXPOSURE":
-            return (
-                f"Security detection <b>{title}</b> identified public blob exposure on Azure Storage. "
-                f"Automated posture inspection verified allowBlobPublicAccess and SAS generation, resulting in dynamic score <b>{dynamic_label.upper()} ({dynamic_score}/100)</b>."
-            )
-        elif incident_type == "IMDS_TOKEN_THEFT":
-            return (
-                f"Security alert <b>{title}</b> indicated exploitation of Instance Metadata Service (169.254.169.254) to harvest Managed Identity credentials. "
-                f"Dynamic ML Model classified the resulting threat as <b>{dynamic_label.upper()} ({dynamic_score}/100)</b>."
-            )
-        else:
-            return (
-                f"Microsoft Sentinel alert <b>{title}</b> was ingested with static severity <b>{static_sev}</b>. "
-                f"Deep cloud evidence collection evaluated the posture, yielding dynamic score <b>{dynamic_label.upper()} ({dynamic_score}/100)</b>."
-            )
-
-    @staticmethod
     def generate_markdown(incident: Dict[str, Any]) -> str:
         """Generates a complete Markdown investigation report."""
         inc_id = incident.get("incident_id", "INC-UNKNOWN")
-        title = incident.get("title", "Microsoft Entra ID Security Alert")
+        title = incident.get("title", "Cloud Security Threat & Privilege Escalation Incident")
         created_at = incident.get("created_at", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"))
         static_sev = incident.get("sentinel_static_severity", incident.get("static_severity", "Medium"))
         dynamic_score = incident.get("dynamic_ml_risk_score", 50.0)
         dynamic_label = incident.get("dynamic_risk_label", "Medium")
-        target_resource = incident.get("target_resource", "Microsoft Entra ID")
-        attacker_ip = incident.get("attacker_ip", "101.0.63.28")
-        affected_user = incident.get("affected_user", "identity@corp.onmicrosoft.com")
-        incident_type = incident.get("incident_type") or determine_incident_type(incident)
+        target_resource = incident.get("target_resource", incident.get("resource_name", "Azure Subscription / Core Resources"))
+        attacker_ip = incident.get("attacker_ip", incident.get("source_ip", "198.51.100.74 (Anomalous Geo)"))
+        affected_user = incident.get("affected_user", incident.get("identity_name", "svc-app-prod@corp.azure.com"))
 
         # Risk Factors
         risk_factors = incident.get("top_risk_factors", [])
@@ -89,7 +53,7 @@ class ForensicReportGenerator:
             factors_md += f"{idx}. **{lbl}** ({pct}% Impact): {expl}\n"
 
         if not factors_md:
-            factors_md = "- Baseline cloud security parameters evaluated.\n"
+            factors_md = "- Baseline cloud activity with standard security parameters.\n"
 
         # Timeline
         timeline_events = incident.get("timeline", [])
@@ -98,34 +62,36 @@ class ForensicReportGenerator:
             for ev in timeline_events:
                 t = ev.get("timestamp", ev.get("time", "T-00:00"))
                 typ = ev.get("event_type", ev.get("event", "Event"))
-                src = ev.get("source", "Azure Telemetry")
+                src = ev.get("source", "Azure Log")
                 desc = ev.get("description", "")
                 mitre = ev.get("mitre_tactic", "")
                 mitre_str = f" `[MITRE: {mitre}]`" if mitre else ""
                 timeline_md += f"- **`{t}`** — **{typ}** ({src}){mitre_str}: {desc}\n"
         else:
             timeline_md = (
-                f"- **`{created_at}`** — **Initial Detection** (Microsoft Sentinel): Alert triggered on {target_resource}\n"
-                f"- **`+2m 14s`** — **Automated Forensics Bundling**: Collected evidence snapshot\n"
-                f"- **`+2m 16s`** — **ML Dynamic Evaluation**: Severity calculated to {dynamic_label} ({dynamic_score}/100)\n"
+                f"- **`{created_at}`** — **Initial Detection** (Azure Sentinel): Alert triggered on {target_resource}\n"
+                f"- **`+2m 14s`** — **Automated ARM Bundling**: Collected IAM, Storage, and NSG posture snapshots\n"
+                f"- **`+2m 16s`** — **ML Dynamic Evaluation**: Severity recalculated to {dynamic_label} ({dynamic_score}/100)\n"
             )
 
         # Evidence Summary Table
         ev_data = incident.get("evidence_snapshot", {})
-        iam_elev = "YES (Escalated)" if ev_data.get("iam_recent_role_elevation") else "Normal / Clean"
-        mfa_byp = "BYPASSED" if ev_data.get("mfa_bypassed") else "Enforced / Not Bypassed"
-        storage_pub = "PUBLIC ACCESS ENABLED" if ev_data.get("storage_public_access_enabled") else "Private (Secure)"
-        imds_tok = "HARVESTED / COMPROMISED" if ev_data.get("imds_token_accessed") else "Clean (No Probe)"
-        nsg_open = "0.0.0.0/0 INGRESS OPEN" if ev_data.get("nsg_unrestricted_inbound_any") else "Protected"
-        exfil_mb = ev_data.get("exfiltrated_data_mb", 0.0)
+        iam_elev = "YES (Escalated)" if ev_data.get("iam_recent_role_elevation") or incident.get("iam_recent_role_elevation") else "No"
+        mfa_byp = "YES (Bypassed)" if ev_data.get("mfa_bypassed") or incident.get("mfa_bypassed") else "No"
+        storage_pub = "YES (Public Enabled)" if ev_data.get("storage_public_access_enabled") or incident.get("storage_public_access_enabled") else "No (Private)"
+        imds_tok = "CRITICAL (Token Harvested)" if ev_data.get("imds_token_accessed") or incident.get("imds_token_accessed") else "Clean"
+        nsg_open = "YES (0.0.0.0/0 Ingress)" if ev_data.get("nsg_unrestricted_inbound_any") or incident.get("nsg_unrestricted_inbound_any") else "Protected"
+        exfil_mb = ev_data.get("exfiltrated_data_mb", incident.get("exfiltrated_data_mb", 0.0))
 
         # Remediation Commands
-        remediation_cmds = incident.get("remediation_playbook")
-        if not remediation_cmds or len(remediation_cmds) == 0:
-            remediation_cmds = DeepEvidenceBundler.generate_remediation_playbook(incident)
+        remediation_cmds = incident.get("remediation_playbook", [
+            f"# 1. Immediately revoke active session tokens for compromised identity\naz ad user update --id {affected_user} --account-enabled false",
+            f"# 2. Disable public access on affected storage account\naz storage account update --name targetstorageaccount --allow-blob-public-access false",
+            f"# 3. Enforce NSG rule to block suspicious ingress\naz network nsg rule create -g ProdRG --nsg-name ProdNSG -n BlockThreatIP --priority 100 --source-address-prefixes {attacker_ip} --destination-port-ranges '*' --direction Inbound --access Deny",
+            "# 4. Rotate Key Vault access keys and secrets\naz keyvault key rotate --vault-name MainKeyVault --name AppSecretKey"
+        ])
 
         playbook_md = "\n```bash\n" + "\n\n".join(remediation_cmds) + "\n```"
-        finding_text = ForensicReportGenerator._get_finding_summary(incident_type, title, static_sev, dynamic_label, dynamic_score)
 
         md_content = f"""# 🔒 Cloud Security Forensic Investigation Report
 **Report ID:** `FOR-{inc_id}` | **Classification:** `RESTRICTED / TLP:AMBER` | **Generated:** `{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}`
@@ -138,20 +104,20 @@ class ForensicReportGenerator:
 | :--- | :--- |
 | **Incident ID** | `{inc_id}` |
 | **Alert Title** | **{title}** |
-| **Attack Vector** | **`{incident_type}`** |
 | **Sentinel Baseline Severity** | **`{static_sev}`** |
 | **Dynamic ML Recalibrated Score** | **`{dynamic_score} / 100` (`{dynamic_label.upper()}`)** |
-| **Target Asset / Scope** | `{target_resource}` |
-| **Target Identity** | `{affected_user}` |
-| **Threat Origin IP** | `{attacker_ip}` |
+| **Severity Escalation Delta** | `+{incident.get('severity_delta', 0)} pts` |
+| **Primary Target Asset** | `{target_resource}` |
+| **Compromised Identity** | `{affected_user}` |
+| **Identified Threat Source** | `{attacker_ip}` |
 
-> **Key Investigation Finding:** {finding_text}
+> **Key Investigation Finding:** While Azure Sentinel initially categorized this alert with static `{static_sev}` severity, automated deep cloud evidence collection revealed multiple high-risk configuration vectors (including privilege elevation and public access exposure). The Machine Learning Dynamic Risk Model recalculated the incident severity to **{dynamic_label.upper()} ({dynamic_score}/100)**.
 
 ---
 
 ## 2. Dynamic ML Risk Factor Breakdown
 
-The following cloud telemetry and environmental features contributed to the dynamic risk evaluation:
+The following cloud environmental features contributed most heavily to the dynamic risk recalibration:
 
 {factors_md}
 
@@ -162,7 +128,7 @@ The following cloud telemetry and environmental features contributed to the dyna
 | Evidence Vector | Inspected Property | Finding Status | Risk Weight |
 | :--- | :--- | :--- | :--- |
 | **Identity / IAM** | Recent Role Elevation | `{iam_elev}` | High |
-| **Identity / Auth** | MFA / Conditional Access | `{mfa_byp}` | High |
+| **Identity / IAM** | MFA / Conditional Access | `{mfa_byp}` | High |
 | **Storage Security** | Blob Public Access | `{storage_pub}` | Critical |
 | **Compute / IMDS** | VM Managed Identity Token | `{imds_tok}` | Critical |
 | **Network Security** | Inbound NSG Firewall Rules | `{nsg_open}` | Medium |
@@ -170,7 +136,7 @@ The following cloud telemetry and environmental features contributed to the dyna
 
 ---
 
-## 4. Chronological Attack Timeline Narrative (MITRE ATT&CK Aligned)
+## 4. Chronological Attack Timeline Narrative
 
 {timeline_md}
 
@@ -242,6 +208,7 @@ Execute the following commands in the Azure Cloud Shell or response automation p
 
         styles = getSampleStyleSheet()
         
+        # Custom ReportLab Styles
         title_style = ParagraphStyle(
             "ReportTitle",
             parent=styles["Heading1"],
@@ -293,11 +260,9 @@ Execute the following commands in the Azure Cloud Shell or response automation p
         dynamic_score = incident.get("dynamic_ml_risk_score", 50.0)
         dynamic_label = incident.get("dynamic_risk_label", "Medium")
         static_sev = incident.get("sentinel_static_severity", "Medium")
-        incident_type = incident.get("incident_type") or determine_incident_type(incident)
-        title = incident.get("title", "Microsoft Entra ID Security Alert")
 
         story.append(Paragraph("CLOUD FORENSIC INVESTIGATION REPORT", title_style))
-        story.append(Paragraph(f"<b>Report ID:</b> FOR-{inc_id} &nbsp;|&nbsp; <b>Attack Vector:</b> {incident_type} &nbsp;|&nbsp; <b>Date:</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}", body_style))
+        story.append(Paragraph(f"<b>Report ID:</b> FOR-{inc_id} &nbsp;|&nbsp; <b>Classification:</b> RESTRICTED (TLP:AMBER) &nbsp;|&nbsp; <b>Date:</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}", body_style))
         story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#2B6CB0"), spaceAfter=10))
 
         # 2. Executive Summary Table
@@ -307,11 +272,11 @@ Execute the following commands in the Azure Cloud Shell or response automation p
 
         summary_data = [
             [Paragraph("<b>Incident ID:</b>", body_style), Paragraph(str(inc_id), body_style),
-             Paragraph("<b>Target Resource:</b>", body_style), Paragraph(str(incident.get("target_resource", "Microsoft Entra ID")), body_style)],
+             Paragraph("<b>Target Resource:</b>", body_style), Paragraph(str(incident.get("target_resource", "Azure Core Resources")), body_style)],
             [Paragraph("<b>Sentinel Static Severity:</b>", body_style), Paragraph(f"<b>{static_sev}</b>", body_style),
              Paragraph("<b>ML Dynamic Risk Score:</b>", body_style), Paragraph(f"<b><font color='{score_color.hexval()}'>{dynamic_score}/100 ({dynamic_label.upper()})</font></b>", body_style)],
-            [Paragraph("<b>Target Identity:</b>", body_style), Paragraph(str(incident.get("affected_user", "identity@corp.onmicrosoft.com")), body_style),
-             Paragraph("<b>Threat Origin IP:</b>", body_style), Paragraph(str(incident.get("attacker_ip", "101.0.63.28")), body_style)],
+            [Paragraph("<b>Compromised Identity:</b>", body_style), Paragraph(str(incident.get("affected_user", "svc-account@corp.azure.com")), body_style),
+             Paragraph("<b>Threat Origin IP:</b>", body_style), Paragraph(str(incident.get("attacker_ip", "198.51.100.74")), body_style)],
         ]
         summary_table = Table(summary_data, colWidths=[1.5*inch, 2.0*inch, 1.5*inch, 2.5*inch])
         summary_table.setStyle(TableStyle([
@@ -322,8 +287,11 @@ Execute the following commands in the Azure Cloud Shell or response automation p
         ]))
         story.append(summary_table)
 
-        finding_text = ForensicReportGenerator._get_finding_summary(incident_type, title, static_sev, dynamic_label, dynamic_score)
-        story.append(Paragraph(f"<b>Forensic Finding:</b> {finding_text}", alert_style))
+        story.append(Paragraph(
+            f"<b>Forensic Finding:</b> The Sentinel rule originally assigned a static severity of <b>{static_sev}</b>. "
+            f"Deep cloud evidence bundling identified critical risk flags that elevated the dynamic score to <b>{dynamic_score}/100 ({dynamic_label})</b>.",
+            alert_style
+        ))
 
         # 3. Dynamic Risk Factors Breakdown
         story.append(Paragraph("2. Primary Machine Learning Risk Drivers", h2_style))
@@ -351,12 +319,12 @@ Execute the following commands in the Azure Cloud Shell or response automation p
         
         audit_data = [
             [Paragraph("<b>Evidence Vector</b>", body_style), Paragraph("<b>Property Inspected</b>", body_style), Paragraph("<b>Finding Status</b>", body_style)],
-            [Paragraph("Identity / IAM", body_style), Paragraph("Recent Role Elevation", body_style), Paragraph("YES (Escalated)" if ev_data.get("iam_recent_role_elevation") else "Normal / Clean", body_style)],
-            [Paragraph("Identity / Auth", body_style), Paragraph("MFA / Conditional Access", body_style), Paragraph("BYPASSED" if ev_data.get("mfa_bypassed") else "Enforced", body_style)],
-            [Paragraph("Storage Security", body_style), Paragraph("Blob Public Access Enabled", body_style), Paragraph("PUBLIC ACCESS ENABLED" if ev_data.get("storage_public_access_enabled") else "Private", body_style)],
-            [Paragraph("Compute / IMDS", body_style), Paragraph("Managed Identity IMDS Token", body_style), Paragraph("HARVESTED / COMPROMISED" if ev_data.get("imds_token_accessed") else "Clean", body_style)],
-            [Paragraph("Network Security", body_style), Paragraph("Inbound NSG Open Port (0.0.0.0/0)", body_style), Paragraph("EXPOSED TO INTERNET" if ev_data.get("nsg_unrestricted_inbound_any") else "Protected", body_style)],
-            [Paragraph("Data Egress", body_style), Paragraph("Data Volume Exfiltrated", body_style), Paragraph(f"{ev_data.get('exfiltrated_data_mb', 0)} MB", body_style)],
+            [Paragraph("Identity / IAM", body_style), Paragraph("Recent Role Elevation", body_style), Paragraph("YES (Escalated to Privileged Role)" if ev_data.get("iam_recent_role_elevation") or incident.get("iam_recent_role_elevation") else "Normal", body_style)],
+            [Paragraph("Identity / IAM", body_style), Paragraph("MFA / Conditional Access", body_style), Paragraph("BYPASSED" if ev_data.get("mfa_bypassed") or incident.get("mfa_bypassed") else "Enforced", body_style)],
+            [Paragraph("Storage Security", body_style), Paragraph("Blob Public Access Enabled", body_style), Paragraph("PUBLIC ACCESS ENABLED" if ev_data.get("storage_public_access_enabled") or incident.get("storage_public_access_enabled") else "Private", body_style)],
+            [Paragraph("Compute / IMDS", body_style), Paragraph("Managed Identity IMDS Token", body_style), Paragraph("HARVESTED / COMPROMISED" if ev_data.get("imds_token_accessed") or incident.get("imds_token_accessed") else "Clean", body_style)],
+            [Paragraph("Network Security", body_style), Paragraph("Inbound NSG Open Port (0.0.0.0/0)", body_style), Paragraph("EXPOSED TO INTERNET" if ev_data.get("nsg_unrestricted_inbound_any") or incident.get("nsg_unrestricted_inbound_any") else "Protected", body_style)],
+            [Paragraph("Data Egress", body_style), Paragraph("Data Volume Exfiltrated", body_style), Paragraph(f"{ev_data.get('exfiltrated_data_mb', incident.get('exfiltrated_data_mb', 0))} MB", body_style)],
         ]
         audit_table = Table(audit_data, colWidths=[1.8*inch, 2.5*inch, 3.2*inch])
         audit_table.setStyle(TableStyle([
@@ -367,15 +335,14 @@ Execute the following commands in the Azure Cloud Shell or response automation p
         story.append(audit_table)
 
         # 5. Chronological Attack Timeline
-        story.append(Paragraph("4. Chronological Attack Timeline (MITRE ATT&CK Aligned)", h2_style))
-        timeline_rows = [[Paragraph("<b>Timestamp</b>", body_style), Paragraph("<b>Event & Source</b>", body_style), Paragraph("<b>Description & MITRE</b>", body_style)]]
+        story.append(Paragraph("4. Chronological Attack Timeline", h2_style))
+        timeline_rows = [[Paragraph("<b>Timestamp</b>", body_style), Paragraph("<b>Event & Source</b>", body_style), Paragraph("<b>Description</b>", body_style)]]
         
         for ev in incident.get("timeline", []):
-            mitre_info = f" [MITRE: {ev.get('mitre_tactic')}]" if ev.get('mitre_tactic') else ""
             timeline_rows.append([
                 Paragraph(str(ev.get("timestamp", ev.get("time", ""))), body_style),
                 Paragraph(f"<b>{ev.get('event_type', ev.get('event'))}</b><br/>({ev.get('source', 'Azure')})", body_style),
-                Paragraph(f"{ev.get('description', '')}<b>{mitre_info}</b>", body_style)
+                Paragraph(str(ev.get("description", "")), body_style)
             ])
         
         if len(timeline_rows) > 1:
@@ -389,14 +356,16 @@ Execute the following commands in the Azure Cloud Shell or response automation p
 
         # 6. Containment & Remediation Playbook
         story.append(Paragraph("5. Recommended Azure CLI Remediation Commands", h2_style))
-        playbook_cmds = incident.get("remediation_playbook")
-        if not playbook_cmds or len(playbook_cmds) == 0:
-            playbook_cmds = DeepEvidenceBundler.generate_remediation_playbook(incident)
-
+        playbook_cmds = incident.get("remediation_playbook", [
+            "az ad user update --id compromised-user@corp.com --account-enabled false",
+            "az storage account update --name targetstorage --allow-blob-public-access false",
+            "az network nsg rule create -g ProdRG --nsg-name ProdNSG -n BlockThreat --priority 100 --source-address-prefixes 198.51.100.74 --access Deny"
+        ])
         for cmd in playbook_cmds:
             story.append(Paragraph(f"$ {cmd}", code_style))
             story.append(Spacer(1, 2))
 
+        # Build document
         doc.build(story)
         logger.info(f"Generated PDF forensic report at: {output_path}")
         return output_path

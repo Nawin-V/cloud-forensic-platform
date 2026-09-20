@@ -4,28 +4,6 @@ import { api } from '../services/api';
 
 const SCENARIO_PRESETS = [
   {
-    title: "Entra ID - Brute Force / Account Lockout Detection",
-    static_sev: "Medium",
-    target: "Microsoft Entra ID (Tenant Directory)",
-    user: "test123@corp.onmicrosoft.com",
-    ip: "101.0.63.28",
-    evidence: {
-      sentinel_static_severity_code: 2,
-      iam_recent_role_elevation: 0,
-      iam_scope_level_code: 0,
-      mfa_bypassed: 0,
-      unusual_geo_ip: 1,
-      storage_public_access_enabled: 0,
-      storage_sas_unrestricted: 0,
-      exfiltrated_data_mb: 0.0,
-      nsg_unrestricted_inbound_any: 0,
-      imds_token_accessed: 0,
-      keyvault_secret_accessed: 0,
-      contains_sensitive_pii_flag: 0,
-      custom_role_wildcard_perm: 0
-    }
-  },
-  {
     title: "VM IMDS Token Theft & Key Vault Access",
     static_sev: "Low",
     target: "/subscriptions/sub-prod-01/resourceGroups/App-RG/providers/Microsoft.Compute/virtualMachines/vm-prod-api-01",
