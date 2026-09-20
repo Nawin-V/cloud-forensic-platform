@@ -56,17 +56,12 @@ def determine_incident_type(payload: Dict[str, Any]) -> str:
         or ""
     )
     
-    # Check nested properties if Sentinel ARM or Logic App schema
-    props = payload.get("properties") or payload.get("object", {}).get("properties") or {}
+    # Check nested properties if Sentinel ARM schema
+    props = payload.get("properties", {})
     if isinstance(props, dict):
         title = title or props.get("title", "")
         description = description or props.get("description", "")
-        rule_name = rule_name or (props.get("relatedAnalyticRuleIds", [""])[0] if isinstance(props.get("relatedAnalyticRuleIds"), list) and props.get("relatedAnalyticRuleIds") else "")
-        alerts = props.get("alerts", [])
-        if alerts and isinstance(alerts[0], dict):
-            alert_props = alerts[0].get("properties", {})
-            title = title or alert_props.get("alertDisplayName", "")
-            rule_name = rule_name or alert_props.get("additionalData", {}).get("Analytic Rule Name", "")
+        rule_name = rule_name or props.get("relatedAnalyticRuleIds", [""])[0] if isinstance(props.get("relatedAnalyticRuleIds"), list) else rule_name
 
     ext_props = payload.get("ExtendedProperties", {}) or payload.get("extendedProperties", {})
     result_type = str(ext_props.get("ResultType", ""))
@@ -158,17 +153,15 @@ class AzureSentinelService:
         if not str(incident_id).startswith("INC-"):
             incident_id = f"INC-AZURE-{str(incident_id).replace('#', '').strip()}"
 
-        # 2. Extract Title and Properties
-        props = payload.get("properties") or payload.get("object", {}).get("properties") or {}
-        if not isinstance(props, dict):
-            props = {}
+        # 2. Extract Title
+        props = payload.get("properties", {}) if isinstance(payload.get("properties"), dict) else {}
         alerts_list = payload.get("Alerts", []) or props.get("alerts", []) or []
         first_alert_title = ""
-        first_alert_rule = ""
         if alerts_list and isinstance(alerts_list[0], dict):
-            alert_props = alerts_list[0].get("properties", {}) if isinstance(alerts_list[0].get("properties"), dict) else alerts_list[0]
-            first_alert_title = alert_props.get("alertDisplayName") or alert_props.get("AlertDisplayName", "")
-            first_alert_rule = alert_props.get("additionalData", {}).get("Analytic Rule Name", "")
+            first_alert_title = (
+                alerts_list[0].get("AlertDisplayName")
+                or alerts_list[0].get("properties", {}).get("alertDisplayName", "")
+            )
 
         title = (
             payload.get("Title")
@@ -177,17 +170,14 @@ class AzureSentinelService:
             or payload.get("AnalyticsRuleName")
             or props.get("title")
             or first_alert_title
-            or first_alert_rule
             or "Microsoft Entra ID Security Alert"
         )
 
         # 3. Analytics Rule & Description
         analytics_rule_name = (
             payload.get("AnalyticsRuleName")
-            or first_alert_rule
-            or first_alert_title
             or payload.get("RuleName")
-            or (props.get("relatedAnalyticRuleIds", [""])[0] if isinstance(props.get("relatedAnalyticRuleIds"), list) and props.get("relatedAnalyticRuleIds") else title)
+            or props.get("relatedAnalyticRuleIds", [""])[0] if isinstance(props.get("relatedAnalyticRuleIds"), list) and props.get("relatedAnalyticRuleIds") else title
         )
         description = (
             payload.get("Description")
