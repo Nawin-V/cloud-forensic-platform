@@ -2,6 +2,9 @@ import os
 import sys
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+pkg_dir = os.path.join(BASE_DIR, ".python_packages", "lib", "site-packages")
+if os.path.exists(pkg_dir) and pkg_dir not in sys.path:
+    sys.path.insert(0, pkg_dir)
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 

@@ -3,12 +3,18 @@ FastAPI Server Entrypoint for Cloud Incident & Forensic Response Platform.
 """
 
 import os
+import sys
 import json
 import logging
 from dotenv import load_dotenv
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+pkg_dir = os.path.join(BASE_DIR, ".python_packages", "lib", "site-packages")
+if os.path.exists(pkg_dir) and pkg_dir not in sys.path:
+    sys.path.insert(0, pkg_dir)
+
 # Automatically load .env credentials
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 load_dotenv()
 
 from fastapi import FastAPI
