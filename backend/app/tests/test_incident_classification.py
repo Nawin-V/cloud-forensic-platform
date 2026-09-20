@@ -122,6 +122,55 @@ def test_sentinel_webhook_ingestion_and_timeline():
         print("✅ End-to-end Sentinel Brute Force ingestion and timeline verified")
 
 
+def test_logic_app_sentinel_schema():
+    """Verify that incoming payload from Azure Logic App / Automation Rule is correctly parsed."""
+    with TestClient(app) as client:
+        logic_app_payload = {
+            "SchemaType": "Incident",
+            "objectEventType": "Create",
+            "workspaceInfo": {
+                "SubscriptionId": "0e3bb114-e13e-4c03-9357-7aa7a1068480",
+                "ResourceGroupName": "forensic-demo-rg",
+                "WorkspaceName": "forensic-law-workspace"
+            },
+            "object": {
+                "id": "11d0db09-44b0-4a65-98d3-4e2df2427fd7",
+                "name": "11d0db09-44b0-4a65-98d3-4e2df2427fd7",
+                "properties": {
+                    "title": "Entra ID - Brute Force / Account Lockout Detection",
+                    "description": "Detects failed Microsoft Entra ID sign-in activity that may indicate password brute-force or repeated authentication attempts.",
+                    "severity": "Medium",
+                    "status": "New",
+                    "incidentNumber": 1,
+                    "additionalData": {
+                        "tactics": ["CredentialAccess"],
+                        "techniques": ["T1110"]
+                    },
+                    "alerts": [
+                        {
+                            "properties": {
+                                "alertDisplayName": "Entra ID - Brute Force / Account Lockout Detection",
+                                "additionalData": {
+                                    "Analytic Rule Name": "Entra ID - Brute Force / Account Lockout Detection"
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+
+        res = client.post("/api/sentinel/webhook", json=logic_app_payload)
+        assert res.status_code == 200
+        data = res.json()
+
+        assert data["title"] == "Entra ID - Brute Force / Account Lockout Detection"
+        assert data["incident_type"] == "BRUTE_FORCE"
+        assert data["affected_user"] == "test123@corp.onmicrosoft.com"
+        assert data["attacker_ip"] == "101.0.63.28"
+        assert data["target_resource"] == "Microsoft Entra ID (Tenant Directory)"
+        assert len(data["timeline"]) >= 5
+
 def test_report_generation():
     """Verify Markdown, HTML, and PDF report generation for Brute Force incident."""
     with TestClient(app) as client:
@@ -161,5 +210,6 @@ def test_report_generation():
 if __name__ == "__main__":
     test_incident_type_classification()
     test_sentinel_webhook_ingestion_and_timeline()
+    test_logic_app_sentinel_schema()
     test_report_generation()
     print("\n🎉 ALL INCIDENT-TYPE AWARENESS & CLASSIFICATION TESTS PASSED! 🎉\n")
