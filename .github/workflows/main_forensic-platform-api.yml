@@ -23,11 +23,13 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install backend dependencies
+      - name: Verify backend
         working-directory: backend
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python --version
+          test -f requirements.txt
+          test -f app/main.py
+          echo "Backend files verified"
 
       - name: Login to Azure
         uses: azure/login@v2
@@ -35,6 +37,18 @@ jobs:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_2E392625933148F29B27D490C5B2D60B }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_F262895AC5B049228F6250A8BF5CA04C }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_BCC67289DF834CC697DA1F9FFD957730 }}
+
+      - name: Configure Azure App Service
+        run: |
+          az webapp config appsettings set \
+            --resource-group Forensic-Demo-RG \
+            --name forensic-platform-api \
+            --settings SCM_DO_BUILD_DURING_DEPLOYMENT=1
+
+          az webapp config set \
+            --resource-group Forensic-Demo-RG \
+            --name forensic-platform-api \
+            --startup-file "uvicorn app.main:app --host 0.0.0.0 --port \$PORT"
 
       - name: Deploy backend to Azure
         uses: azure/webapps-deploy@v3
