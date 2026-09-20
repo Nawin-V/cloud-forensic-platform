@@ -35,5 +35,6 @@ ehthumbs.db
 Thumbs.db
 
 # Generated PDF reports & scratch cache
+*.pdf
 backend/app/reports/*.pdf
 backend/app/data/incidents/*.json

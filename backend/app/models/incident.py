@@ -63,12 +63,14 @@ class MLScoreResult(BaseModel):
 class IncidentCreate(BaseModel):
     incident_id: Optional[str] = None
     title: str
+    incident_type: Optional[str] = None
+    analytics_rule_name: Optional[str] = None
     sentinel_static_severity: str = "Medium"
     status: str = "Active"
     target_resource: str
     affected_user: Optional[str] = "svc-account@corp.azure.com"
     attacker_ip: Optional[str] = "198.51.100.74"
-    evidence_snapshot: EvidenceSnapshot
+    evidence_snapshot: Optional[EvidenceSnapshot] = None
     timeline: Optional[List[TimelineEvent]] = []
     remediation_playbook: Optional[List[str]] = []
 
@@ -76,6 +78,8 @@ class IncidentCreate(BaseModel):
 class IncidentResponse(BaseModel):
     incident_id: str
     title: str
+    incident_type: Optional[str] = None
+    analytics_rule_name: Optional[str] = None
     created_at: str
     updated_at: Optional[str] = None
     status: str
