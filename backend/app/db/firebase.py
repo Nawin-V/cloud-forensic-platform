@@ -1,188 +1,622 @@
 """
 Firebase Cloud Firestore & Local Persistence Hybrid Adapter.
-Connects to Firebase Firestore if credentials are provided;
-otherwise falls back seamlessly to local JSON/file storage.
+
+Primary storage:
+    Firebase Cloud Firestore
+
+Fallback storage:
+    Local JSON files
+
+Azure App Service:
+    Uses FIREBASE_SERVICE_ACCOUNT_JSON environment variable.
 """
 
 import os
 import json
 import logging
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore
+
     FIREBASE_AVAILABLE = True
 except ImportError:
     FIREBASE_AVAILABLE = False
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
 logger = logging.getLogger("storage_adapter")
+
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCAL_INCIDENTS_DIR = os.path.join(BASE_DIR, "data", "incidents")
-DEFAULT_FIREBASE_KEY = os.path.join(os.path.dirname(BASE_DIR), "serviceAccountKey.json")
+
+DEFAULT_FIREBASE_KEY = os.path.join(
+    os.path.dirname(BASE_DIR),
+    "serviceAccountKey.json"
+)
 
 
 class StorageAdapter:
-    """Hybrid storage engine supporting Firebase Firestore and Local File Store."""
+    """Hybrid storage engine supporting Firebase Firestore and local fallback."""
 
     _instance: Optional["StorageAdapter"] = None
 
     def __init__(self, key_path: Optional[str] = None):
-        self.key_path = key_path or os.getenv("FIREBASE_CREDENTIALS_PATH", DEFAULT_FIREBASE_KEY)
+        self.key_path = (
+            key_path
+            or os.getenv("FIREBASE_CREDENTIALS_PATH")
+            or DEFAULT_FIREBASE_KEY
+        )
+
         self.db = None
         self.using_firebase = False
+
         os.makedirs(LOCAL_INCIDENTS_DIR, exist_ok=True)
+
         self._initialize()
 
     @classmethod
     def get_instance(cls) -> "StorageAdapter":
         if cls._instance is None:
             cls._instance = cls()
+
         return cls._instance
 
+    # ============================================================
+    # FIREBASE INITIALIZATION
+    # ============================================================
+
     def _initialize(self):
-        """Initializes Firebase Firestore if service account key exists and cloud network is reachable."""
-        if FIREBASE_AVAILABLE and os.path.exists(self.key_path):
-            try:
-                # Fast socket connectivity check (0.8s timeout)
-                import socket
-                socket.create_connection(("firestore.googleapis.com", 443), timeout=0.8).close()
+        """Initialize Firestore using Azure environment credentials."""
+
+        if not FIREBASE_AVAILABLE:
+            logger.warning(
+                "Firebase Admin SDK is not installed. "
+                "Using local storage."
+            )
+            self.using_firebase = False
+            return
+
+        try:
+            # ----------------------------------------------------
+            # OPTION 1: Azure App Service environment variable
+            # ----------------------------------------------------
+
+            service_account_json = os.getenv(
+                "FIREBASE_SERVICE_ACCOUNT_JSON"
+            )
+
+            if service_account_json:
+                logger.info(
+                    "🔐 FIREBASE_SERVICE_ACCOUNT_JSON detected."
+                )
+
+                try:
+                    service_account_info = json.loads(
+                        service_account_json
+                    )
+                except json.JSONDecodeError as e:
+                    logger.error(
+                        f"Invalid Firebase service account JSON: {e}"
+                    )
+                    self.using_firebase = False
+                    return
 
                 if not firebase_admin._apps:
-                    cred = credentials.Certificate(self.key_path)
-                    firebase_admin.initialize_app(cred)
+                    cred = credentials.Certificate(
+                        service_account_info
+                    )
+
+                    firebase_admin.initialize_app(
+                        cred,
+                        {
+                            "projectId": service_account_info.get(
+                                "project_id"
+                            )
+                        }
+                    )
+
                 self.db = firestore.client()
                 self.using_firebase = True
-                logger.info(f"🔥 Connected to Firebase Cloud Firestore successfully! (Key: {self.key_path})")
+
+                logger.info(
+                    "🔥 Connected to Firebase Cloud Firestore "
+                    "using FIREBASE_SERVICE_ACCOUNT_JSON."
+                )
+
                 return
-            except Exception as e:
-                logger.warning(f"Firebase initialization skipped or offline: {e}")
+
+            # ----------------------------------------------------
+            # OPTION 2: Local serviceAccountKey.json
+            # ----------------------------------------------------
+
+            if os.path.exists(self.key_path):
+
+                logger.info(
+                    f"🔑 Local Firebase key found: {self.key_path}"
+                )
+
+                if not firebase_admin._apps:
+                    cred = credentials.Certificate(
+                        self.key_path
+                    )
+
+                    firebase_admin.initialize_app(cred)
+
+                self.db = firestore.client()
+                self.using_firebase = True
+
+                logger.info(
+                    "🔥 Connected to Firebase Cloud Firestore "
+                    "using local service account key."
+                )
+
+                return
+
+            # ----------------------------------------------------
+            # No Firebase credentials
+            # ----------------------------------------------------
+
+            logger.warning(
+                "⚠️ No Firebase credentials found."
+            )
+
+        except Exception as e:
+            logger.exception(
+                f"❌ Firebase initialization failed: {e}"
+            )
 
         self.using_firebase = False
-        logger.info(f"📁 Operating in Local Storage Mode (Incidents directory: {LOCAL_INCIDENTS_DIR})")
 
+        logger.info(
+            f"📁 Operating in Local Storage Mode "
+            f"(Directory: {LOCAL_INCIDENTS_DIR})"
+        )
+
+    # ============================================================
+    # STATUS
+    # ============================================================
 
     def is_connected_to_firebase(self) -> bool:
-        """Returns True if connected to live Firebase Firestore."""
-        return self.using_firebase
+        """Returns True when Firestore is connected."""
+
+        return self.using_firebase and self.db is not None
+
+    # ============================================================
+    # SAVE INCIDENT
+    # ============================================================
 
     def save_incident(self, incident: Dict[str, Any]) -> bool:
-        """Saves or updates an incident document in Firestore and local mirror."""
+        """
+        Save incident to Firestore and local fallback.
+
+        Firestore write is synchronous so the incident is safely
+        persisted before the API request finishes.
+        """
+
         inc_id = incident.get("incident_id")
+
         if not inc_id:
-            raise ValueError("Incident must contain 'incident_id'")
+            raise ValueError(
+                "Incident must contain 'incident_id'"
+            )
 
-        incident["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).isoformat()
+
+        incident["updated_at"] = now
+
         if "created_at" not in incident:
-            incident["created_at"] = incident["updated_at"]
+            incident["created_at"] = now
 
-        # 1. Always persist to local storage first for instant sub-millisecond access
-        saved_locally = False
+        firestore_saved = False
+        local_saved = False
+
+        # --------------------------------------------------------
+        # FIRESTORE - PRIMARY STORAGE
+        # --------------------------------------------------------
+
+        if self.is_connected_to_firebase():
+
+            try:
+                self.db.collection("incidents").document(
+                    inc_id
+                ).set(
+                    incident,
+                    merge=True
+                )
+
+                firestore_saved = True
+
+                logger.info(
+                    f"🔥 Incident {inc_id} saved to Firestore."
+                )
+
+            except Exception as e:
+
+                logger.exception(
+                    f"❌ Firestore save failed for {inc_id}: {e}"
+                )
+
+        # --------------------------------------------------------
+        # LOCAL FALLBACK / MIRROR
+        # --------------------------------------------------------
+
         try:
-            local_path = os.path.join(LOCAL_INCIDENTS_DIR, f"{inc_id}.json")
-            with open(local_path, "w") as f:
-                json.dump(incident, f, indent=2)
-            saved_locally = True
+
+            local_path = os.path.join(
+                LOCAL_INCIDENTS_DIR,
+                f"{inc_id}.json"
+            )
+
+            with open(local_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    incident,
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                    default=str
+                )
+
+            local_saved = True
+
         except Exception as e:
-            logger.error(f"Error writing incident {inc_id} to local storage: {e}")
 
-        # 2. Asynchronously / Safely sync to Firebase Cloud Firestore in background
-        if self.using_firebase and self.db:
+            logger.error(
+                f"Local incident save failed for {inc_id}: {e}"
+            )
+
+        return firestore_saved or local_saved
+
+    # ============================================================
+    # GET INCIDENT
+    # ============================================================
+
+    def get_incident(
+        self,
+        incident_id: str
+    ) -> Optional[Dict[str, Any]]:
+
+        """Retrieve incident from Firestore first, then local storage."""
+
+        # --------------------------------------------------------
+        # FIRESTORE FIRST
+        # --------------------------------------------------------
+
+        if self.is_connected_to_firebase():
+
             try:
-                import threading
-                def _bg_sync(db_client, doc_id, doc_data):
-                    try:
-                        db_client.collection("incidents").document(doc_id).set(doc_data, merge=True)
-                        logger.info(f"🔥 Mirrored incident {doc_id} to Cloud Firestore")
-                    except Exception as err:
-                        logger.warning(f"Background Firestore sync warning for {doc_id}: {err}")
 
-                threading.Thread(target=_bg_sync, args=(self.db, inc_id, incident), daemon=True).start()
-            except Exception as e:
-                logger.error(f"Failed to start Firestore sync thread: {e}")
+                doc = (
+                    self.db
+                    .collection("incidents")
+                    .document(incident_id)
+                    .get()
+                )
 
-        return saved_locally
-
-    def get_incident(self, incident_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieves an incident instantly by its ID from local fast cache."""
-        local_path = os.path.join(LOCAL_INCIDENTS_DIR, f"{incident_id}.json")
-        if os.path.exists(local_path):
-            try:
-                with open(local_path, "r") as f:
-                    return json.load(f)
-            except Exception as err:
-                logger.error(f"Error reading local incident {incident_id}: {err}")
-
-        # Fallback to Firestore if not found locally
-        if self.using_firebase and self.db:
-            try:
-                doc = self.db.collection("incidents").document(incident_id).get(timeout=2.0)
                 if doc.exists:
-                    return doc.to_dict()
+
+                    data = doc.to_dict()
+
+                    logger.info(
+                        f"🔥 Retrieved incident {incident_id} "
+                        f"from Firestore."
+                    )
+
+                    return data
+
             except Exception as e:
-                logger.warning(f"Firestore fallback fetch failed for {incident_id}: {e}")
+
+                logger.warning(
+                    f"Firestore retrieval failed for "
+                    f"{incident_id}: {e}"
+                )
+
+        # --------------------------------------------------------
+        # LOCAL FALLBACK
+        # --------------------------------------------------------
+
+        local_path = os.path.join(
+            LOCAL_INCIDENTS_DIR,
+            f"{incident_id}.json"
+        )
+
+        if os.path.exists(local_path):
+
+            try:
+
+                with open(
+                    local_path,
+                    "r",
+                    encoding="utf-8"
+                ) as f:
+
+                    return json.load(f)
+
+            except Exception as e:
+
+                logger.error(
+                    f"Local incident read failed "
+                    f"for {incident_id}: {e}"
+                )
 
         return None
 
-    def list_incidents(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Lists all incidents instantly from local fast storage cache (<1ms)."""
-        incidents: List[Dict[str, Any]] = []
+    # ============================================================
+    # LIST INCIDENTS
+    # ============================================================
+
+    def list_incidents(
+        self,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+
+        """
+        Retrieve incidents from Firestore.
+
+        Local files are used as fallback and are merged without
+        duplicating incident IDs.
+        """
+
+        incidents_by_id: Dict[str, Dict[str, Any]] = {}
+
+        # --------------------------------------------------------
+        # FIRESTORE
+        # --------------------------------------------------------
+
+        if self.is_connected_to_firebase():
+
+            try:
+
+                docs = (
+                    self.db
+                    .collection("incidents")
+                    .stream()
+                )
+
+                for doc in docs:
+
+                    data = doc.to_dict()
+
+                    if data:
+
+                        incident_id = (
+                            data.get("incident_id")
+                            or doc.id
+                        )
+
+                        data["incident_id"] = incident_id
+
+                        incidents_by_id[
+                            incident_id
+                        ] = data
+
+                logger.info(
+                    f"🔥 Loaded {len(incidents_by_id)} "
+                    f"incidents from Firestore."
+                )
+
+            except Exception as e:
+
+                logger.warning(
+                    f"Firestore list failed: {e}"
+                )
+
+        # --------------------------------------------------------
+        # LOCAL FALLBACK / MIRROR
+        # --------------------------------------------------------
 
         if os.path.exists(LOCAL_INCIDENTS_DIR):
-            for filename in os.listdir(LOCAL_INCIDENTS_DIR):
-                if filename.endswith(".json"):
-                    path = os.path.join(LOCAL_INCIDENTS_DIR, filename)
-                    try:
-                        with open(path, "r") as f:
-                            incidents.append(json.load(f))
-                    except Exception as err:
-                        logger.error(f"Error reading {path}: {err}")
 
-        return sorted(incidents, key=lambda x: x.get("dynamic_ml_risk_score", 0), reverse=True)[:limit]
+            for filename in os.listdir(
+                LOCAL_INCIDENTS_DIR
+            ):
 
+                if not filename.endswith(".json"):
+                    continue
 
-    def delete_incident(self, incident_id: str) -> bool:
-        """Deletes an incident from storage."""
-        if self.using_firebase and self.db:
+                path = os.path.join(
+                    LOCAL_INCIDENTS_DIR,
+                    filename
+                )
+
+                try:
+
+                    with open(
+                        path,
+                        "r",
+                        encoding="utf-8"
+                    ) as f:
+
+                        incident = json.load(f)
+
+                    incident_id = incident.get(
+                        "incident_id"
+                    )
+
+                    if incident_id:
+
+                        # Firestore takes priority
+                        if incident_id not in incidents_by_id:
+                            incidents_by_id[
+                                incident_id
+                            ] = incident
+
+                except Exception as e:
+
+                    logger.error(
+                        f"Error reading local incident "
+                        f"{path}: {e}"
+                    )
+
+        incidents = list(
+            incidents_by_id.values()
+        )
+
+        # --------------------------------------------------------
+        # SORT BY RISK
+        # --------------------------------------------------------
+
+        incidents.sort(
+            key=lambda x: float(
+                x.get(
+                    "dynamic_ml_risk_score",
+                    0
+                ) or 0
+            ),
+            reverse=True
+        )
+
+        return incidents[:limit]
+
+    # ============================================================
+    # DELETE INCIDENT
+    # ============================================================
+
+    def delete_incident(
+        self,
+        incident_id: str
+    ) -> bool:
+
+        deleted = False
+
+        # --------------------------------------------------------
+        # FIRESTORE
+        # --------------------------------------------------------
+
+        if self.is_connected_to_firebase():
+
             try:
-                self.db.collection("incidents").document(incident_id).delete(timeout=4.0)
+
+                self.db.collection(
+                    "incidents"
+                ).document(
+                    incident_id
+                ).delete()
+
+                deleted = True
+
+                logger.info(
+                    f"🔥 Deleted incident "
+                    f"{incident_id} from Firestore."
+                )
+
             except Exception as e:
-                logger.error(f"Firebase delete error: {e}")
 
+                logger.error(
+                    f"Firestore delete failed: {e}"
+                )
 
-        local_path = os.path.join(LOCAL_INCIDENTS_DIR, f"{incident_id}.json")
+        # --------------------------------------------------------
+        # LOCAL
+        # --------------------------------------------------------
+
+        local_path = os.path.join(
+            LOCAL_INCIDENTS_DIR,
+            f"{incident_id}.json"
+        )
+
         if os.path.exists(local_path):
-            os.remove(local_path)
-            return True
-        return False
+
+            try:
+
+                os.remove(local_path)
+
+                deleted = True
+
+            except Exception as e:
+
+                logger.error(
+                    f"Local delete failed: {e}"
+                )
+
+        return deleted
+
+    # ============================================================
+    # PURGE ALL
+    # ============================================================
 
     def purge_all_incidents(self) -> int:
-        """Deletes all incidents from Firebase Firestore and local filesystem storage."""
+
         count = 0
-        # 1. Purge from Firebase Firestore
-        if self.using_firebase and self.db:
+
+        # --------------------------------------------------------
+        # FIRESTORE
+        # --------------------------------------------------------
+
+        if self.is_connected_to_firebase():
+
             try:
-                docs = self.db.collection("incidents").stream()
+
+                docs = (
+                    self.db
+                    .collection("incidents")
+                    .stream()
+                )
+
                 for doc in docs:
+
                     doc.reference.delete()
+
                     count += 1
-                logger.info(f"🔥 Purged {count} incident documents from Cloud Firestore")
+
+                logger.info(
+                    f"🔥 Purged {count} incidents "
+                    f"from Firestore."
+                )
+
             except Exception as e:
-                logger.error(f"Error purging Firestore incidents: {e}")
 
-        # 2. Purge local incident files
+                logger.error(
+                    f"Firestore purge failed: {e}"
+                )
+
+        # --------------------------------------------------------
+        # LOCAL
+        # --------------------------------------------------------
+
         local_count = 0
-        if os.path.exists(LOCAL_INCIDENTS_DIR):
-            for filename in os.listdir(LOCAL_INCIDENTS_DIR):
-                if filename.endswith(".json"):
-                    try:
-                        os.remove(os.path.join(LOCAL_INCIDENTS_DIR, filename))
-                        local_count += 1
-                    except Exception as err:
-                        logger.error(f"Error deleting local file {filename}: {err}")
-        logger.info(f"📁 Purged {local_count} local incident cache files")
-        return max(count, local_count)
 
+        if os.path.exists(
+            LOCAL_INCIDENTS_DIR
+        ):
+
+            for filename in os.listdir(
+                LOCAL_INCIDENTS_DIR
+            ):
+
+                if filename.endswith(".json"):
+
+                    try:
+
+                        os.remove(
+                            os.path.join(
+                                LOCAL_INCIDENTS_DIR,
+                                filename
+                            )
+                        )
+
+                        local_count += 1
+
+                    except Exception as e:
+
+                        logger.error(
+                            f"Local delete failed "
+                            f"for {filename}: {e}"
+                        )
+
+        logger.info(
+            f"📁 Purged {local_count} local "
+            f"incident files."
+        )
+
+        return max(
+            count,
+            local_count
+        )
