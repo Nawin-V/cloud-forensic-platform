@@ -12,8 +12,9 @@ Handles:
 
 import os
 import uuid
+import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from datetime import datetime
 
 
@@ -60,10 +61,13 @@ class AzureSentinelService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _first_value(value: Any, default: Optional[str] = None) -> Optional[str]:
+    def _first_value(
+        value: Any,
+        default: Optional[str] = None
+    ) -> Optional[str]:
         """
-        Extract the first value when Sentinel Custom Details returns
-        values as arrays.
+        Extract the first value when Sentinel Custom Details
+        returns values as arrays.
         """
 
         if value is None:
@@ -72,12 +76,16 @@ class AzureSentinelService:
         if isinstance(value, list):
             if not value:
                 return default
+
             return str(value[0])
 
         return str(value)
 
     @staticmethod
-    def _get_nested(data: Dict[str, Any], *keys: str) -> Any:
+    def _get_nested(
+        data: Dict[str, Any],
+        *keys: str
+    ) -> Any:
         """Safely retrieve nested dictionary values."""
 
         current = data
@@ -89,6 +97,50 @@ class AzureSentinelService:
             current = current.get(key)
 
         return current
+
+    # ------------------------------------------------------------------
+    # SENTINEL PAYLOAD NORMALIZATION
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_incident_object(
+        payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Microsoft Sentinel Logic App incident trigger wraps the actual
+        Sentinel incident inside the top-level 'object' property.
+
+        Example:
+
+        {
+            "eventUniqueId": "...",
+            "objectSchemaType": "Incident",
+            "objectEventType": "Create",
+            "object": {
+                "id": "...",
+                "name": "...",
+                "type": "Microsoft.SecurityInsights/Incidents",
+                "properties": {
+                    ...
+                }
+            }
+        }
+
+        This method unwraps that object while still supporting
+        direct/simple webhook payloads.
+        """
+
+        if not isinstance(payload, dict):
+            return {}
+
+        incident_object = payload.get("object")
+
+        if isinstance(incident_object, dict):
+            return incident_object
+
+        # Backward compatibility:
+        # Some webhook callers may send the incident directly.
+        return payload
 
     # ------------------------------------------------------------------
     # SENTINEL ENTITY EXTRACTION
@@ -107,13 +159,22 @@ class AzureSentinelService:
         attacker_ip = None
         target_resource = None
 
-        entities = incident.get("Entities", [])
+        properties = incident.get("properties", {})
 
-        # Actual Sentinel ARM incident payload uses:
+        if not isinstance(properties, dict):
+            properties = {}
+
+        # Actual Sentinel ARM incident payload:
         # properties.relatedEntities
+        entities = properties.get(
+            "relatedEntities",
+            []
+        )
+
+        # Backward compatibility with older/simple payloads.
         if not entities:
-            entities = incident.get("properties", {}).get(
-                "relatedEntities",
+            entities = incident.get(
+                "Entities",
                 []
             )
 
@@ -125,17 +186,25 @@ class AzureSentinelService:
             if not isinstance(entity, dict):
                 continue
 
-            properties = entity.get("properties", entity)
+            entity_properties = entity.get(
+                "properties",
+                entity
+            )
+
+            if not isinstance(entity_properties, dict):
+                entity_properties = {}
 
             entity_type = (
                 entity.get("kind")
                 or entity.get("Kind")
-                or properties.get("kind")
-                or properties.get("entityType")
+                or entity_properties.get("kind")
+                or entity_properties.get("entityType")
                 or ""
             )
 
-            entity_type = str(entity_type).lower()
+            entity_type = str(
+                entity_type
+            ).lower()
 
             # ----------------------------------------------------------
             # ACCOUNT / USER
@@ -145,21 +214,55 @@ class AzureSentinelService:
                 "account",
                 "user"
             ]:
+
+                # Preferred: UPN
                 affected_user = (
-                    properties.get("userPrincipalName")
-                    or properties.get("Name")
-                    or properties.get("name")
-                    or properties.get("accountName")
+                    entity_properties.get(
+                        "userPrincipalName"
+                    )
+                    or entity_properties.get(
+                        "UserPrincipalName"
+                    )
                     or affected_user
                 )
 
-            # Sentinel Account entities sometimes have:
-            # properties.accountName
-            if not affected_user:
-                affected_user = (
-                    properties.get("userPrincipalName")
-                    or properties.get("accountName")
-                )
+                # Sentinel Account entity fallback
+                if not affected_user:
+                    affected_user = (
+                        entity_properties.get(
+                            "Name"
+                        )
+                        or entity_properties.get(
+                            "name"
+                        )
+                        or entity_properties.get(
+                            "accountName"
+                        )
+                        or entity_properties.get(
+                            "AccountName"
+                        )
+                    )
+
+                # Some Sentinel Account entities store UPN
+                # under additionalData.
+                if not affected_user:
+                    additional_data = entity_properties.get(
+                        "additionalData",
+                        {}
+                    )
+
+                    if isinstance(
+                        additional_data,
+                        dict
+                    ):
+                        affected_user = (
+                            additional_data.get(
+                                "UserPrincipalName"
+                            )
+                            or additional_data.get(
+                                "userPrincipalName"
+                            )
+                        )
 
             # ----------------------------------------------------------
             # IP
@@ -170,11 +273,23 @@ class AzureSentinelService:
                 "ipaddress",
                 "host"
             ]:
+
                 attacker_ip = (
-                    properties.get("address")
-                    or properties.get("Address")
-                    or properties.get("ipAddress")
-                    or properties.get("ip")
+                    entity_properties.get(
+                        "address"
+                    )
+                    or entity_properties.get(
+                        "Address"
+                    )
+                    or entity_properties.get(
+                        "ipAddress"
+                    )
+                    or entity_properties.get(
+                        "IPAddress"
+                    )
+                    or entity_properties.get(
+                        "ip"
+                    )
                     or attacker_ip
                 )
 
@@ -187,10 +302,20 @@ class AzureSentinelService:
                 "azure resource",
                 "resource"
             ]:
+
                 target_resource = (
-                    properties.get("resourceId")
-                    or properties.get("ResourceId")
-                    or properties.get("name")
+                    entity_properties.get(
+                        "resourceId"
+                    )
+                    or entity_properties.get(
+                        "ResourceId"
+                    )
+                    or entity_properties.get(
+                        "name"
+                    )
+                    or entity_properties.get(
+                        "Name"
+                    )
                     or target_resource
                 )
 
@@ -211,22 +336,31 @@ class AzureSentinelService:
         """
         Extract Custom Details generated by the Sentinel analytics rule.
 
+        Microsoft Sentinel can return Custom Details as a JSON string.
+
         Example:
 
-        {
-            "UserPrincipalName": ["adam@domain.com"],
-            "IPAddress": ["103.x.x.x"],
-            "FailedAttempts": ["7"],
-            "FirstAttempt": ["..."],
-            "LastAttempt": ["..."]
-        }
+        "Custom Details": "{\"UserPrincipalName\":[\"bob@domain.com\"],
+        \"IPAddress\":[\"103.x.x.x\"],
+        \"FailedAttempts\":[\"9\"],
+        \"FirstAttempt\":[\"...\"],
+        \"LastAttempt\":[\"...\"]}"
         """
 
         custom_details: Dict[str, Any] = {}
 
-        properties = incident.get("properties", {})
+        properties = incident.get(
+            "properties",
+            {}
+        )
 
-        alerts = properties.get("alerts", [])
+        if not isinstance(properties, dict):
+            properties = {}
+
+        alerts = properties.get(
+            "alerts",
+            []
+        )
 
         if not isinstance(alerts, list):
             alerts = []
@@ -236,29 +370,111 @@ class AzureSentinelService:
             if not isinstance(alert, dict):
                 continue
 
-            alert_properties = alert.get("properties", {})
+            alert_properties = alert.get(
+                "properties",
+                {}
+            )
+
+            if not isinstance(alert_properties, dict):
+                continue
 
             additional_data = alert_properties.get(
                 "additionalData",
                 {}
             )
 
-            if not isinstance(additional_data, dict):
+            if not isinstance(
+                additional_data,
+                dict
+            ):
                 continue
 
-            details = additional_data.get(
-                "Custom Details",
-                {}
+            raw_details = additional_data.get(
+                "Custom Details"
             )
 
-            if isinstance(details, dict):
-                custom_details.update(details)
+            if raw_details is None:
+                continue
 
-        # Also support a directly supplied Custom Details object
-        direct_details = incident.get("Custom Details")
+            # ----------------------------------------------------------
+            # CASE 1:
+            # Custom Details is already a dictionary
+            # ----------------------------------------------------------
 
-        if isinstance(direct_details, dict):
-            custom_details.update(direct_details)
+            if isinstance(
+                raw_details,
+                dict
+            ):
+                custom_details.update(
+                    raw_details
+                )
+                continue
+
+            # ----------------------------------------------------------
+            # CASE 2:
+            # Sentinel returns Custom Details as JSON string
+            # ----------------------------------------------------------
+
+            if isinstance(
+                raw_details,
+                str
+            ):
+
+                try:
+                    parsed_details = json.loads(
+                        raw_details
+                    )
+
+                    if isinstance(
+                        parsed_details,
+                        dict
+                    ):
+                        custom_details.update(
+                            parsed_details
+                        )
+
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "⚠️ Unable to parse Sentinel Custom Details JSON"
+                    )
+
+        # --------------------------------------------------------------
+        # Backward compatibility:
+        # direct Custom Details
+        # --------------------------------------------------------------
+
+        direct_details = incident.get(
+            "Custom Details"
+        )
+
+        if isinstance(
+            direct_details,
+            dict
+        ):
+            custom_details.update(
+                direct_details
+            )
+
+        elif isinstance(
+            direct_details,
+            str
+        ):
+
+            try:
+                parsed_direct = json.loads(
+                    direct_details
+                )
+
+                if isinstance(
+                    parsed_direct,
+                    dict
+                ):
+                    custom_details.update(
+                        parsed_direct
+                    )
+
+            except json.JSONDecodeError:
+                pass
 
         return custom_details
 
@@ -270,34 +486,107 @@ class AzureSentinelService:
         self,
         incident: Dict[str, Any]
     ) -> Optional[str]:
-        """Extract Sentinel analytics rule name."""
+        """
+        Extract the actual Microsoft Sentinel Analytics Rule name.
 
-        properties = incident.get("properties", {})
+        Priority:
 
-        alerts = properties.get("alerts", [])
+        1. additionalData["Analytic Rule Name"]
+        2. alertRule
+        3. friendlyName
+        4. top-level legacy fields
+        """
 
-        if isinstance(alerts, list):
+        properties = incident.get(
+            "properties",
+            {}
+        )
+
+        if not isinstance(properties, dict):
+            properties = {}
+
+        alerts = properties.get(
+            "alerts",
+            []
+        )
+
+        if isinstance(
+            alerts,
+            list
+        ):
 
             for alert in alerts:
 
-                if not isinstance(alert, dict):
+                if not isinstance(
+                    alert,
+                    dict
+                ):
                     continue
 
-                alert_properties = alert.get("properties", {})
+                alert_properties = alert.get(
+                    "properties",
+                    {}
+                )
 
-                rule_name = (
-                    alert_properties.get("alertRule")
-                    or alert_properties.get("productComponentName")
-                    or alert_properties.get("vendorName")
+                if not isinstance(
+                    alert_properties,
+                    dict
+                ):
+                    continue
+
+                additional_data = alert_properties.get(
+                    "additionalData",
+                    {}
+                )
+
+                if not isinstance(
+                    additional_data,
+                    dict
+                ):
+                    additional_data = {}
+
+                # ------------------------------------------------------
+                # Actual Sentinel field from your payload
+                # ------------------------------------------------------
+
+                rule_name = additional_data.get(
+                    "Analytic Rule Name"
                 )
 
                 if rule_name:
-                    return str(rule_name)
+                    return str(
+                        rule_name
+                    )
 
+                # ------------------------------------------------------
+                # Other possible Sentinel fields
+                # ------------------------------------------------------
+
+                rule_name = (
+                    alert_properties.get(
+                        "alertRule"
+                    )
+                    or alert_properties.get(
+                        "friendlyName"
+                    )
+                )
+
+                if rule_name:
+                    return str(
+                        rule_name
+                    )
+
+        # Legacy/simple webhook support
         return (
-            incident.get("AnalyticsRuleName")
-            or incident.get("analytics_rule_name")
-            or incident.get("RuleName")
+            incident.get(
+                "AnalyticsRuleName"
+            )
+            or incident.get(
+                "analytics_rule_name"
+            )
+            or incident.get(
+                "RuleName"
+            )
         )
 
     # ------------------------------------------------------------------
@@ -316,22 +605,34 @@ class AzureSentinelService:
         """
 
         title = str(
-            incident.get("title")
-            or incident.get("sentinel_title")
+            incident.get(
+                "title"
+            )
+            or incident.get(
+                "sentinel_title"
+            )
             or ""
         ).lower()
 
         rule = str(
-            incident.get("analytics_rule_name")
+            incident.get(
+                "analytics_rule_name"
+            )
             or ""
         ).lower()
 
         description = str(
-            incident.get("description")
+            incident.get(
+                "description"
+            )
             or ""
         ).lower()
 
-        text = f"{title} {rule} {description}"
+        text = (
+            f"{title} "
+            f"{rule} "
+            f"{description}"
+        )
 
         # --------------------------------------------------------------
         # BRUTE FORCE
@@ -407,24 +708,40 @@ class AzureSentinelService:
         """
         Normalize a Microsoft Sentinel incident webhook payload.
 
-        Supports both:
+        Supports:
 
-        1. Actual Sentinel ARM incident payloads
-        2. Simple/custom webhook payloads
+        1. Microsoft Sentinel Logic App incident trigger payloads
+        2. Direct Sentinel ARM incident objects
+        3. Simple/custom webhook payloads
         """
 
-        if not isinstance(payload, dict):
+        if not isinstance(
+            payload,
+            dict
+        ):
             raise ValueError(
                 "Sentinel webhook payload must be a JSON object"
             )
 
         # ==============================================================
-        # ACTUAL SENTINEL INCIDENT PROPERTIES
+        # IMPORTANT:
+        # Microsoft Sentinel Logic App trigger wraps the actual
+        # incident inside payload["object"].
         # ==============================================================
 
-        properties = payload.get("properties", {})
+        incident = self._get_incident_object(
+            payload
+        )
 
-        if not isinstance(properties, dict):
+        properties = incident.get(
+            "properties",
+            {}
+        )
+
+        if not isinstance(
+            properties,
+            dict
+        ):
             properties = {}
 
         # ==============================================================
@@ -432,41 +749,88 @@ class AzureSentinelService:
         # ==============================================================
 
         incident_id = (
-            properties.get("incidentNumber")
-            or properties.get("incidentId")
-            or payload.get("IncidentId")
-            or payload.get("incidentId")
-            or payload.get("id")
+            properties.get(
+                "incidentNumber"
+            )
+            or properties.get(
+                "incidentId"
+            )
+            or incident.get(
+                "IncidentId"
+            )
+            or incident.get(
+                "incidentId"
+            )
+            or incident.get(
+                "name"
+            )
+            or incident.get(
+                "id"
+            )
+            or payload.get(
+                "IncidentId"
+            )
+            or payload.get(
+                "incidentId"
+            )
         )
 
         if not incident_id:
             incident_id = (
-                f"INC-AZURE-{uuid.uuid4().hex[:6].upper()}"
+                f"INC-AZURE-"
+                f"{uuid.uuid4().hex[:6].upper()}"
             )
 
-        incident_id = str(incident_id)
+        incident_id = str(
+            incident_id
+        )
 
         # ==============================================================
         # TITLE
         # ==============================================================
 
         title = (
-            properties.get("title")
-            or payload.get("Title")
-            or payload.get("IncidentName")
+            properties.get(
+                "title"
+            )
+            or incident.get(
+                "Title"
+            )
+            or incident.get(
+                "IncidentName"
+            )
+            or payload.get(
+                "Title"
+            )
+            or payload.get(
+                "IncidentName"
+            )
             or "Cloud Security Incident"
         )
 
-        title = str(title)
+        title = str(
+            title
+        )
 
         # ==============================================================
         # DESCRIPTION
         # ==============================================================
 
         description = (
-            properties.get("description")
-            or payload.get("Description")
+            properties.get(
+                "description"
+            )
+            or incident.get(
+                "Description"
+            )
+            or payload.get(
+                "Description"
+            )
             or ""
+        )
+
+        description = str(
+            description
         )
 
         # ==============================================================
@@ -474,33 +838,63 @@ class AzureSentinelService:
         # ==============================================================
 
         severity = (
-            properties.get("severity")
-            or payload.get("Severity")
+            properties.get(
+                "severity"
+            )
+            or incident.get(
+                "Severity"
+            )
+            or payload.get(
+                "Severity"
+            )
             or "Unknown"
         )
 
-        severity = str(severity)
+        severity = str(
+            severity
+        )
 
         # ==============================================================
         # STATUS
         # ==============================================================
 
         status = (
-            properties.get("status")
-            or payload.get("Status")
+            properties.get(
+                "status"
+            )
+            or incident.get(
+                "Status"
+            )
+            or payload.get(
+                "Status"
+            )
             or "New"
         )
 
-        status = str(status)
+        status = str(
+            status
+        )
 
         # ==============================================================
         # CREATED TIME
         # ==============================================================
 
         created_time = (
-            properties.get("createdTimeUtc")
-            or payload.get("CreatedTimeUtc")
-            or payload.get("createdTimeUtc")
+            properties.get(
+                "createdTimeUtc"
+            )
+            or incident.get(
+                "CreatedTimeUtc"
+            )
+            or incident.get(
+                "createdTimeUtc"
+            )
+            or payload.get(
+                "CreatedTimeUtc"
+            )
+            or payload.get(
+                "createdTimeUtc"
+            )
             or datetime.utcnow().isoformat() + "Z"
         )
 
@@ -509,8 +903,15 @@ class AzureSentinelService:
         # ==============================================================
 
         updated_time = (
-            properties.get("lastModifiedTimeUtc")
-            or payload.get("LastModifiedTimeUtc")
+            properties.get(
+                "lastModifiedTimeUtc"
+            )
+            or incident.get(
+                "LastModifiedTimeUtc"
+            )
+            or payload.get(
+                "LastModifiedTimeUtc"
+            )
             or created_time
         )
 
@@ -518,16 +919,20 @@ class AzureSentinelService:
         # ANALYTICS RULE
         # ==============================================================
 
-        analytics_rule_name = self._extract_analytics_rule(
-            payload
+        analytics_rule_name = (
+            self._extract_analytics_rule(
+                incident
+            )
         )
 
         # ==============================================================
         # ENTITIES
         # ==============================================================
 
-        entity_data = self._extract_entities(
-            payload
+        entity_data = (
+            self._extract_entities(
+                incident
+            )
         )
 
         affected_user = entity_data.get(
@@ -546,32 +951,54 @@ class AzureSentinelService:
         # CUSTOM DETAILS
         # ==============================================================
 
-        custom_details = self._extract_custom_details(
-            payload
+        custom_details = (
+            self._extract_custom_details(
+                incident
+            )
         )
 
         # ==============================================================
         # CUSTOM DETAIL VALUES
         # ==============================================================
 
-        user_principal_name = self._first_value(
-            custom_details.get("UserPrincipalName")
+        user_principal_name = (
+            self._first_value(
+                custom_details.get(
+                    "UserPrincipalName"
+                )
+            )
         )
 
-        ip_address = self._first_value(
-            custom_details.get("IPAddress")
+        ip_address = (
+            self._first_value(
+                custom_details.get(
+                    "IPAddress"
+                )
+            )
         )
 
-        failed_attempts_raw = self._first_value(
-            custom_details.get("FailedAttempts")
+        failed_attempts_raw = (
+            self._first_value(
+                custom_details.get(
+                    "FailedAttempts"
+                )
+            )
         )
 
-        first_attempt = self._first_value(
-            custom_details.get("FirstAttempt")
+        first_attempt = (
+            self._first_value(
+                custom_details.get(
+                    "FirstAttempt"
+                )
+            )
         )
 
-        last_attempt = self._first_value(
-            custom_details.get("LastAttempt")
+        last_attempt = (
+            self._first_value(
+                custom_details.get(
+                    "LastAttempt"
+                )
+            )
         )
 
         # ==============================================================
@@ -579,10 +1006,14 @@ class AzureSentinelService:
         # ==============================================================
 
         if user_principal_name:
-            affected_user = user_principal_name
+            affected_user = (
+                user_principal_name
+            )
 
         if ip_address:
-            attacker_ip = ip_address
+            attacker_ip = (
+                ip_address
+            )
 
         # ==============================================================
         # FAILED ATTEMPTS
@@ -596,7 +1027,11 @@ class AzureSentinelService:
                 failed_attempts = int(
                     failed_attempts_raw
                 )
-            except (ValueError, TypeError):
+
+            except (
+                ValueError,
+                TypeError
+            ):
                 failed_attempts = None
 
         # ==============================================================
@@ -606,31 +1041,63 @@ class AzureSentinelService:
         normalized_for_type = {
             "title": title,
             "description": description,
-            "analytics_rule_name": analytics_rule_name or ""
+            "analytics_rule_name": (
+                analytics_rule_name
+                or ""
+            )
         }
 
-        incident_type = self.determine_incident_type(
-            normalized_for_type
+        incident_type = (
+            self.determine_incident_type(
+                normalized_for_type
+            )
         )
 
         # ==============================================================
         # MITRE INFORMATION
         # ==============================================================
 
-        tactics = properties.get(
-            "tactics",
-            []
+        additional_data = properties.get(
+            "additionalData",
+            {}
         )
 
-        techniques = properties.get(
-            "techniques",
-            []
+        if not isinstance(
+            additional_data,
+            dict
+        ):
+            additional_data = {}
+
+        tactics = (
+            additional_data.get(
+                "tactics",
+                properties.get(
+                    "tactics",
+                    []
+                )
+            )
         )
 
-        if not isinstance(tactics, list):
+        techniques = (
+            additional_data.get(
+                "techniques",
+                properties.get(
+                    "techniques",
+                    []
+                )
+            )
+        )
+
+        if not isinstance(
+            tactics,
+            list
+        ):
             tactics = []
 
-        if not isinstance(techniques, list):
+        if not isinstance(
+            techniques,
+            list
+        ):
             techniques = []
 
         # ==============================================================
@@ -645,6 +1112,12 @@ class AzureSentinelService:
             severity,
             incident_type
         )
+
+        if analytics_rule_name:
+            logger.info(
+                "📋 Analytics Rule: %s",
+                analytics_rule_name
+            )
 
         if affected_user:
             logger.info(
@@ -687,25 +1160,53 @@ class AzureSentinelService:
             "updated_at": updated_time,
             "last_modified_time_utc": updated_time,
 
-            "analytics_rule_name": analytics_rule_name,
+            "analytics_rule_name": (
+                analytics_rule_name
+            ),
 
             "incident_type": incident_type,
 
-            "target_resource": target_resource,
-            "affected_user": affected_user,
-            "attacker_ip": attacker_ip,
+            "target_resource": (
+                target_resource
+            ),
 
-            "user_principal_name": user_principal_name,
-            "ip_address": ip_address,
+            "affected_user": (
+                affected_user
+            ),
 
-            "failed_attempts": failed_attempts,
-            "first_attempt": first_attempt,
-            "last_attempt": last_attempt,
+            "attacker_ip": (
+                attacker_ip
+            ),
+
+            "user_principal_name": (
+                user_principal_name
+            ),
+
+            "ip_address": (
+                ip_address
+            ),
+
+            "failed_attempts": (
+                failed_attempts
+            ),
+
+            "first_attempt": (
+                first_attempt
+            ),
+
+            "last_attempt": (
+                last_attempt
+            ),
 
             "tactics": tactics,
+
             "techniques": techniques,
 
-            "custom_details": custom_details,
+            "custom_details": (
+                custom_details
+            ),
 
+            # Preserve the complete Logic App/Sentinel payload
+            # for forensic provenance and auditing.
             "raw_sentinel_payload": payload
         }
