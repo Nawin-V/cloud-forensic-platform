@@ -1,70 +1,385 @@
-"""
-Azure Sentinel SIEM Ingestion and Webhook Listener Service.
-Handles real-time Sentinel webhook alerts, REST API polling, and simulated incident scenario generation.
-"""
+def process_webhook_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Processes a Microsoft Sentinel incident payload received through
+    the Sentinel incident trigger / Logic App.
 
-import os
-import uuid
-import logging
-from typing import Dict, Any, List, Optional
-from datetime import datetime
+    Supports the live Microsoft Sentinel incident schema as well as
+    the older flattened/simulated payload format.
+    """
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("sentinel_ingestor")
+    # ---------------------------------------------------------
+    # 1. Get Sentinel incident properties
+    # ---------------------------------------------------------
+    properties = payload.get("properties", {})
 
+    if not isinstance(properties, dict):
+        properties = {}
 
-class AzureSentinelService:
-    """Ingestion service for Azure Sentinel SIEM."""
+    # ---------------------------------------------------------
+    # 2. Incident metadata
+    # ---------------------------------------------------------
+    raw_id = payload.get("id", "")
 
-    def __init__(self):
-        self.tenant_id = os.getenv("AZURE_TENANT_ID")
-        self.client_id = os.getenv("AZURE_CLIENT_ID")
-        self.client_secret = os.getenv("AZURE_CLIENT_SECRET")
-        self.subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
-        self.resource_group = os.getenv("AZURE_RESOURCE_GROUP")
-        self.workspace_name = os.getenv("AZURE_SENTINEL_WORKSPACE")
-        self.live_mode = os.getenv("AZURE_LIVE_MODE", "false").lower() == "true"
+    incident_id = (
+        properties.get("providerIncidentId")
+        or properties.get("incidentNumber")
+        or payload.get("IncidentId")
+        or raw_id
+        or f"INC-AZURE-{uuid.uuid4().hex[:6].upper()}"
+    )
 
-    def is_live_mode(self) -> bool:
-        """Returns True if configured with live Azure credentials."""
-        return bool(self.live_mode and self.tenant_id and self.client_id and self.client_secret)
+    title = (
+        properties.get("title")
+        or payload.get("Title")
+        or payload.get("IncidentName")
+        or "Cloud Security Incident"
+    )
 
-    def process_webhook_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Processes an incoming Sentinel webhook (sent from Sentinel Automation Rule / Logic App).
-        Normalizes entities, extracts target resources, and prepares for deep evidence bundling.
-        """
-        incident_id = payload.get("IncidentId", payload.get("id", f"INC-AZURE-{uuid.uuid4().hex[:6].upper()}"))
-        title = payload.get("Title", payload.get("IncidentName", "Suspicious Azure Cloud Activity Alert"))
-        severity = payload.get("Severity", "Medium")
-        status = payload.get("Status", "Active")
-        created_time = payload.get("CreatedTimeUtc", datetime.utcnow().isoformat() + "Z")
+    severity = (
+        properties.get("severity")
+        or payload.get("Severity")
+        or "Medium"
+    )
 
-        # Extract entities
-        entities = payload.get("Entities", [])
-        affected_user = "unknown-user@corp.azure.com"
-        attacker_ip = "198.51.100.74"
-        target_resource = f"/subscriptions/{self.subscription_id or 'sub-prod-01'}/resourceGroups/{self.resource_group or 'Core-RG'}"
+    status = (
+        properties.get("status")
+        or payload.get("Status")
+        or "New"
+    )
 
-        for ent in entities:
-            ent_kind = ent.get("Kind", ent.get("kind", ""))
-            if ent_kind in ["Account", "User"]:
-                affected_user = ent.get("Name", ent.get("userPrincipalName", affected_user))
-            elif ent_kind in ["Ip", "IP"]:
-                attacker_ip = ent.get("Address", ent.get("ipAddress", attacker_ip))
-            elif ent_kind in ["AzureResource", "Host"]:
-                target_resource = ent.get("ResourceId", ent.get("resourceId", target_resource))
+    created_time = (
+        properties.get("createdTimeUtc")
+        or properties.get("firstActivityTimeUtc")
+        or payload.get("CreatedTimeUtc")
+        or datetime.utcnow().isoformat() + "Z"
+    )
 
-        logger.info(f"🚨 Ingested Sentinel Alert [{incident_id}]: '{title}' (Static Severity: {severity})")
+    # ---------------------------------------------------------
+    # 3. Containers for extracted forensic information
+    # ---------------------------------------------------------
+    affected_user: Optional[str] = None
+    attacker_ip: Optional[str] = None
+    failed_attempts: Optional[int] = None
+    first_attempt: Optional[str] = None
+    last_attempt: Optional[str] = None
 
-        return {
-            "incident_id": incident_id,
-            "title": title,
-            "sentinel_static_severity": severity,
-            "status": status,
-            "created_at": created_time,
-            "target_resource": target_resource,
-            "affected_user": affected_user,
-            "attacker_ip": attacker_ip,
-            "raw_sentinel_payload": payload
-        }
+    # ---------------------------------------------------------
+    # 4. Extract Sentinel related entities
+    # ---------------------------------------------------------
+    related_entities = properties.get("relatedEntities", [])
+
+    if isinstance(related_entities, list):
+
+        for entity in related_entities:
+
+            if not isinstance(entity, dict):
+                continue
+
+            kind = str(
+                entity.get("kind")
+                or entity.get("Kind")
+                or ""
+            ).lower()
+
+            entity_properties = entity.get("properties", {})
+
+            if not isinstance(entity_properties, dict):
+                entity_properties = {}
+
+            # -------------------------
+            # Account entity
+            # -------------------------
+            if kind in ("account", "user"):
+
+                additional_data = entity_properties.get(
+                    "additionalData", {}
+                )
+
+                if not isinstance(additional_data, dict):
+                    additional_data = {}
+
+                affected_user = (
+                    additional_data.get("UserPrincipalName")
+                    or entity_properties.get("userPrincipalName")
+                    or entity_properties.get("upn")
+                    or entity_properties.get("displayName")
+                    or affected_user
+                )
+
+                # If Sentinel only gives accountName + UPN suffix,
+                # reconstruct the complete UPN.
+                if (
+                    not affected_user
+                    or "@" not in str(affected_user)
+                ):
+                    account_name = (
+                        entity_properties.get("accountName")
+                        or additional_data.get("AccountName")
+                    )
+
+                    upn_suffix = (
+                        entity_properties.get("upnSuffix")
+                    )
+
+                    if account_name and upn_suffix:
+                        affected_user = (
+                            f"{account_name}@{upn_suffix}"
+                        )
+
+            # -------------------------
+            # IP entity
+            # -------------------------
+            elif kind in ("ip", "ipaddress"):
+
+                attacker_ip = (
+                    entity_properties.get("address")
+                    or entity_properties.get("ipAddress")
+                    or attacker_ip
+                )
+
+    # ---------------------------------------------------------
+    # 5. Extract alert information
+    # ---------------------------------------------------------
+    alerts = properties.get("alerts", [])
+
+    if isinstance(alerts, list):
+
+        for alert in alerts:
+
+            if not isinstance(alert, dict):
+                continue
+
+            alert_properties = alert.get("properties", {})
+
+            if not isinstance(alert_properties, dict):
+                continue
+
+            additional_data = alert_properties.get(
+                "additionalData",
+                {}
+            )
+
+            if not isinstance(additional_data, dict):
+                continue
+
+            # -------------------------------------------------
+            # Custom Details
+            # Sentinel stores these as a JSON string.
+            # -------------------------------------------------
+            custom_details = additional_data.get(
+                "Custom Details"
+            )
+
+            if isinstance(custom_details, str):
+
+                try:
+                    import json
+
+                    custom_details = json.loads(
+                        custom_details
+                    )
+
+                except (json.JSONDecodeError, TypeError):
+                    custom_details = {}
+
+            if not isinstance(custom_details, dict):
+                custom_details = {}
+
+            # -------------------------------------------------
+            # UserPrincipalName
+            # -------------------------------------------------
+            upn_value = custom_details.get(
+                "UserPrincipalName"
+            )
+
+            if isinstance(upn_value, list):
+                upn_value = (
+                    upn_value[0]
+                    if upn_value
+                    else None
+                )
+
+            if upn_value:
+                affected_user = str(upn_value)
+
+            # -------------------------------------------------
+            # IPAddress
+            # -------------------------------------------------
+            ip_value = custom_details.get(
+                "IPAddress"
+            )
+
+            if isinstance(ip_value, list):
+                ip_value = (
+                    ip_value[0]
+                    if ip_value
+                    else None
+                )
+
+            if ip_value:
+                attacker_ip = str(ip_value)
+
+            # -------------------------------------------------
+            # FailedAttempts
+            # -------------------------------------------------
+            attempts_value = custom_details.get(
+                "FailedAttempts"
+            )
+
+            if isinstance(attempts_value, list):
+                attempts_value = (
+                    attempts_value[0]
+                    if attempts_value
+                    else None
+                )
+
+            if attempts_value is not None:
+                try:
+                    failed_attempts = int(
+                        attempts_value
+                    )
+                except (ValueError, TypeError):
+                    failed_attempts = None
+
+            # -------------------------------------------------
+            # First attempt
+            # -------------------------------------------------
+            first_value = custom_details.get(
+                "FirstAttempt"
+            )
+
+            if isinstance(first_value, list):
+                first_value = (
+                    first_value[0]
+                    if first_value
+                    else None
+                )
+
+            if first_value:
+                first_attempt = str(first_value)
+
+            # -------------------------------------------------
+            # Last attempt
+            # -------------------------------------------------
+            last_value = custom_details.get(
+                "LastAttempt"
+            )
+
+            if isinstance(last_value, list):
+                last_value = (
+                    last_value[0]
+                    if last_value
+                    else None
+                )
+
+            if last_value:
+                last_attempt = str(last_value)
+
+    # ---------------------------------------------------------
+    # 6. Fallback to flattened/simulated payload
+    # ---------------------------------------------------------
+    if not affected_user:
+
+        affected_user = (
+            payload.get("UserPrincipalName")
+            or payload.get("affected_user")
+        )
+
+    if not attacker_ip:
+
+        attacker_ip = (
+            payload.get("IPAddress")
+            or payload.get("attacker_ip")
+        )
+
+    if failed_attempts is None:
+
+        attempts = payload.get("FailedAttempts")
+
+        if attempts is not None:
+
+            try:
+                failed_attempts = int(attempts)
+            except (ValueError, TypeError):
+                pass
+
+    if not first_attempt:
+        first_attempt = payload.get("FirstAttempt")
+
+    if not last_attempt:
+        last_attempt = payload.get("LastAttempt")
+
+    # ---------------------------------------------------------
+    # 7. Never fabricate forensic evidence
+    # ---------------------------------------------------------
+    if not affected_user:
+        affected_user = "Not available"
+
+    if not attacker_ip:
+        attacker_ip = "Not available"
+
+    # ---------------------------------------------------------
+    # 8. Target resource
+    # ---------------------------------------------------------
+    target_resource = (
+        payload.get("target_resource")
+        or properties.get("targetResource")
+        or "Not available"
+    )
+
+    # ---------------------------------------------------------
+    # 9. Logging
+    # ---------------------------------------------------------
+    logger.info(
+        f"🚨 Ingested Sentinel Alert "
+        f"[{incident_id}]: '{title}' "
+        f"(Severity: {severity})"
+    )
+
+    logger.info(
+        f"👤 Affected User: {affected_user}"
+    )
+
+    logger.info(
+        f"🌐 Source IP: {attacker_ip}"
+    )
+
+    if failed_attempts is not None:
+        logger.info(
+            f"🔐 Failed Attempts: {failed_attempts}"
+        )
+
+    # ---------------------------------------------------------
+    # 10. Normalized incident
+    # ---------------------------------------------------------
+    return {
+        "incident_id": str(incident_id),
+        "title": title,
+        "sentinel_static_severity": severity,
+        "status": status,
+        "created_at": created_time,
+        "target_resource": target_resource,
+        "affected_user": affected_user,
+        "attacker_ip": attacker_ip,
+
+        # Brute-force forensic fields
+        "failed_attempts": failed_attempts,
+        "first_attempt": first_attempt,
+        "last_attempt": last_attempt,
+
+        # Detection metadata
+        "analytics_rule_name": title,
+        "mitre_techniques": (
+            properties
+            .get("additionalData", {})
+            .get("techniques", [])
+            if isinstance(
+                properties.get("additionalData", {}),
+                dict
+            )
+            else []
+        ),
+
+        # Preserve original Sentinel evidence
+        "raw_sentinel_payload": payload
+    }
